@@ -1,0 +1,22 @@
+name: Back up to GitLab
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+  delete:
+  schedule:
+    - cron: "37 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    uses: dib-B101/dib-orchestration/.github/workflows/reusable-gitlab-backup.yml@main
+    with:
+      namespace: ai
+    secrets: inherit
