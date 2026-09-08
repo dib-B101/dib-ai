@@ -21,6 +21,7 @@ START_PRICE = 10_000
 
 NORMAL_AUCTION_ID = 10001
 PINGPONG_AUCTION_ID = 10002
+SUBSCRIBER_AUCTION_ID = 10003
 
 
 def _auction(auction_id: int) -> Auction:
@@ -100,8 +101,27 @@ def _pingpong() -> DetectionInput:
     )
 
 
+def _subscriber() -> DetectionInput:
+    """정상. 31 은 이 판매자를 구독한 충성 고객이다.
+
+    판매자 편중도가 100% 지만 구독 관계가 있으므로 R4 는 판단하지 않는다.
+    구독 정보 없이 보면 고위험으로 찍히는 사례다.
+    """
+    seq = [31, 32, 31, 33, 31, 34, 32, 31]
+    offs = [15, 32, 51, 74, 96, 118, 140, 165]
+    return DetectionInput(
+        auction=_auction(SUBSCRIBER_AUCTION_ID),
+        bids=_bids(SUBSCRIBER_AUCTION_ID, seq, offs),
+        members=_members(seq),
+        histories={m: _history([SELLER] * 8) for m in set(seq)},
+        as_of=T0 + timedelta(seconds=DURATION_SEC),
+        subscriptions={m: frozenset({SELLER}) for m in set(seq)},
+    )
+
+
 def demo_data() -> dict[int, DetectionInput]:
     return {
         NORMAL_AUCTION_ID: _normal(),
         PINGPONG_AUCTION_ID: _pingpong(),
+        SUBSCRIBER_AUCTION_ID: _subscriber(),
     }

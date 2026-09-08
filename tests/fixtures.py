@@ -166,6 +166,26 @@ def new_account_auction() -> DetectionInput:
     )
 
 
+def subscriber_auction() -> DetectionInput:
+    """정상. 51 은 판매자를 구독한 충성 고객이다 → R4 는 판단하지 않아야 한다.
+
+    라이브 구독 모델에서 구독자가 그 방송자 경매에만 참여하는 것은 정상 행동이다.
+    편중도만 보면 고위험으로 찍히므로 구독 관계를 확인해야 한다.
+    """
+    seq = [51, 52, 51, 53, 51, 54, 52, 51]
+    offs = [30, 55, 90, 130, 175, 220, 260, 300]
+    members = make_members(seq)
+    histories = {m: make_history(m, [SELLER] * 8) for m in set(seq)}
+    return DetectionInput(
+        auction=make_auction(),
+        bids=make_bids(seq, offs),
+        members=members,
+        histories=histories,
+        as_of=T0 + timedelta(hours=DURATION_HOURS),
+        subscriptions={m: frozenset({SELLER}) for m in set(seq)},
+    )
+
+
 def loyal_bidder_auction() -> DetectionInput:
     """의심. 51 은 최근 10경매가 전부 같은 판매자다 → R4."""
     seq = [51, 52, 53, 51, 54, 52, 51, 55]

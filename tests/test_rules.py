@@ -203,3 +203,50 @@ def test_r5_is_disabled(cfg):
     result = detect(fx.normal_auction(), cfg)
     for r in result.results:
         assert all(h.rule_id != "R5_MULTI_ACCOUNT" for h in r.hits)
+
+
+# ---------------------------------------------------------------- R4 구독 충돌
+
+def test_r4_skips_subscribed_seller(cfg):
+    """구독한 판매자에게 편중된 것은 정상 행동이므로 판단하지 않아야 한다.
+
+    라이브 구독 모델에서는 구독자가 좋아하는 방송자의 경매에만 참여한다.
+    편중도만 보면 충성 고객이 그대로 고위험으로 찍힌다.
+    """
+    inp = fx.subscriber_auction()
+    result = detect(inp, cfg)
+    r = next(x for x in result.results if x.member_id == 51)
+
+    assert "R4_SELLER_CONCENTRATION" in r.skipped_rules
+    assert "구독" in r.skipped_rules["R4_SELLER_CONCENTRATION"]
+    assert all(h.rule_id != "R4_SELLER_CONCENTRATION" for h in r.hits)
+
+
+def test_r4_scores_when_not_subscribed(cfg):
+    """구독하지 않았는데 특정 판매자만 쫓아다니면 여전히 점수가 나와야 한다."""
+    inp = fx.loyal_bidder_auction()   # 구독 정보 없음
+    result = detect(inp, cfg)
+    scored = [
+        h for r in result.results for h in r.hits
+        if h.rule_id == "R4_SELLER_CONCENTRATION" and h.score > 0
+    ]
+    assert scored, "구독하지 않은 편중은 여전히 탐지되어야 한다"
+
+
+def test_subscription_lowers_total_score(cfg):
+    """구독 여부만 다르고 나머지가 같으면, 구독한 쪽 점수가 더 낮아야 한다."""
+    base = fx.subscriber_auction()
+    without = fx.DetectionInput(
+        auction=base.auction, bids=base.bids, members=base.members,
+        histories=base.histories, as_of=base.as_of, subscriptions={},
+    )
+    s_sub = next(r for r in detect(base, cfg).results if r.member_id == 51).rule_score
+    s_not = next(r for r in detect(without, cfg).results if r.member_id == 51).rule_score
+    assert s_sub < s_not
+
+
+def test_subscription_flag_is_recorded(cfg):
+    """관리자가 판정을 이해하려면 구독 여부가 결과에 남아야 한다."""
+    r = next(x for x in detect(fx.subscriber_auction(), cfg).results if x.member_id == 51)
+    assert r.flags["subscribed_to_seller"] is True
+    assert r.to_detail()["flags"]["subscribed_to_seller"] is True

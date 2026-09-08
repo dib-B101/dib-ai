@@ -172,21 +172,33 @@ def r3_new_account_high_bid(ctx: RuleContext) -> RuleOutcome:
 # ---------------------------------------------------------------- R4
 
 def r4_seller_concentration(ctx: RuleContext) -> RuleOutcome:
-    """특정 판매자 경매에 반복 참여하는가.
+    """구독하지 않은 판매자에게 반복해서 몰리는가.
 
-    참여 이력이 적으면 우연히 편중돼 보이므로 신뢰도로 보정한다.
-    3건 중 3건이 같은 판매자인 것과 20건 중 20건인 것은 무게가 다르다.
+    원래는 "특정 판매자 편중" 만 봤는데, 라이브 방송 구독 모델에서는 그것만으로
+    판단할 수 없다. 구독자가 좋아하는 방송자의 경매에만 참여하는 것은 **정상 행동**
+    이며, 편중도만 보면 충성 고객이 그대로 고위험으로 찍힌다.
+
+    그래서 구독 관계가 있으면 이 규칙은 판단하지 않는다. 0 점이 아니라 skip 이다 —
+    "구독했으니 안전하다" 가 아니라 "이 신호로는 판단할 수 없다" 이기 때문이다.
+    가중 평균의 분모에서도 빠져 다른 규칙이 온전한 무게를 갖는다.
+
+    한계: 공모자가 위장하려고 구독할 수 있다. 다만 구독은 공개 관계라 관리자가
+    확인할 수 있고, 핑퐁·재탈환 같은 다른 규칙은 그대로 작동한다.
+    detail 의 flags 에 구독 여부를 남겨 관리자가 판단할 수 있게 한다.
     """
     p = ctx.spec
     min_auctions = int(p.p("min_auctions", 3))
     history = ctx.history
+    seller_id = ctx.inp.auction.seller_id
+
+    if p.p("skip_if_subscribed", True) and ctx.inp.is_subscribed(ctx.member_id, seller_id):
+        return RuleOutcome(None, "구독 중인 판매자 — 편중은 정상 행동이므로 판단하지 않음")
 
     if len(history) < min_auctions:
         return RuleOutcome(
             None, f"과거 참여 {len(history)}건 — 최소 {min_auctions}건 미만"
         )
 
-    seller_id = ctx.inp.auction.seller_id
     concentration = seller_concentration(history, seller_id)
     reliable = int(p.p("reliable_auctions", 8))
     confidence = clamp(len(history) / reliable) if reliable > 0 else 1.0

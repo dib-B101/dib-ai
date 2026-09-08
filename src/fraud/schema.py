@@ -77,6 +77,13 @@ class DetectionInput:
     histories: Mapping[int, tuple[HistoryEntry, ...]]   # member_id -> 과거 참여 이력
     as_of: datetime                                     # 기준 시각. 보통 경매 종료 시각
 
+    # member_id -> 이 회원이 구독 중인 판매자(방송자) id 집합.
+    # subscription 테이블에서 온다. 비어 있으면 구독 정보 없음으로 취급한다.
+    subscriptions: Mapping[int, frozenset[int]] = field(default_factory=dict)
+
+    def is_subscribed(self, member_id: int, seller_id: int) -> bool:
+        return seller_id in self.subscriptions.get(member_id, frozenset())
+
 
 # ---------------------------------------------------------------- 출력
 

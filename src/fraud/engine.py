@@ -62,6 +62,9 @@ def _detect(inp: DetectionInput, cfg: RuleConfig) -> DetectionResult:
             "has_history": len(history) >= 1,
             "has_sufficient_history": len(history) >= 3,
             "has_member_record": member_id in inp.members,
+            # 구독 관계는 R4 를 건너뛰게 만드는 조건이라, 관리자가 판정을 이해하려면
+            # 이 값이 결과에 남아 있어야 한다.
+            "subscribed_to_seller": inp.is_subscribed(member_id, inp.auction.seller_id),
         }
 
         hits: list[RuleHit] = []
