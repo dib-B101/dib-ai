@@ -1,7 +1,15 @@
+# 규칙 엔진
 pyyaml>=6.0
-pytest>=8.0
 
-# EDA / 모델 (기존)
+# API
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# 테스트
+pytest>=8.0
+httpx>=0.27          # fastapi.testclient 가 사용
+
+# EDA / 모델 (노트북)
 pandas
 numpy
 scikit-learn

@@ -11,6 +11,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 영역 | 상태 | 위치 |
 | --- | --- | --- |
 | 이상거래 탐지 — 규칙 기반 베이스라인 | 구현 완료 | `src/fraud/` |
+| 이상거래 탐지 — HTTP API | 구현 완료 | `src/fraud_api/` |
 | 이상거래 탐지 — ML 트랙 | EDA 완료, 서빙 미구현 | `notebooks/` |
 | 상품 검수 | 미착수 | TBD |
 | 개인화 추천 | 미착수 (라이브 전환에 따라 재설계 필요) | TBD |
@@ -22,17 +23,23 @@ dib-ai/
 ├── config/
 │   └── rules.yaml            임계값·가중치. 코드 수정 없이 조정한다
 ├── src/
-│   └── fraud/
-│       ├── __init__.py       공개 API (RuleConfig, detect, combine)
-│       ├── schema.py         입출력 자료구조. DB 를 모른다
-│       ├── config.py         YAML 로더
-│       ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
-│       ├── rules.py          규칙 5종
-│       └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
+│   ├── fraud/                규칙 엔진 (라이브러리)
+│   │   ├── __init__.py       공개 API (RuleConfig, detect, combine)
+│   │   ├── schema.py         입출력 자료구조. DB 를 모른다
+│   │   ├── config.py         YAML 로더
+│   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
+│   │   ├── rules.py          규칙 5종
+│   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
+│   └── fraud_api/            HTTP 계층
+│       ├── main.py           FastAPI 앱 · 엔드포인트
+│       ├── models.py         요청·응답 스키마. 백엔드와의 계약
+│       ├── provider.py       데이터 조회기. DB 가 생기면 여기만 갈아끼운다
+│       └── demo.py           합성 경매. bid 테이블 없이 API 를 호출해 볼 수 있다
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
-│   └── test_engine.py        티켓 완료 조건 검증
+│   ├── test_engine.py        티켓 완료 조건 검증
+│   └── test_api.py           API 계약 검증
 ├── scripts/
 │   └── run_scenarios.py      시나리오 실행 데모
 ├── notebooks/
@@ -51,9 +58,63 @@ dib-ai/
 python -m venv .venv && .venv/Scripts/activate   # Windows
 pip install -r requirements.txt
 
-python -m pytest                    # 테스트 31개
+python -m pytest                    # 테스트 40개
 python scripts/run_scenarios.py     # 시나리오별 점수 확인
+
+# API 서버
+PYTHONPATH=src uvicorn fraud_api.main:app --reload --port 8000
+#   http://localhost:8000/docs   ← 백엔드는 여기를 보고 연동한다
 ```
+
+---
+
+# API
+
+백엔드가 경매 종료 후 호출한다. **연동 시 `/docs` 를 보면 된다** — FastAPI 가 코드에서
+OpenAPI 문서를 자동 생성하므로 별도 문서를 관리하지 않는다.
+
+| 엔드포인트 | 용도 |
+| --- | --- |
+| `POST /internal/fraud/detect` | 경매 1건의 입찰자별 위험도 산출 |
+| `GET /health` | 헬스체크. 인프라가 감시한다 |
+| `GET /docs` | 자동 생성 API 문서 |
+
+```bash
+curl -X POST localhost:8000/internal/fraud/detect \
+  -H "Content-Type: application/json" \
+  -d '{"auction_id": 10002}'
+```
+
+**응답은 `fraud_detection` 컬럼과 1:1 로 대응한다.** 백엔드는 변환 없이 저장한다.
+
+| 응답 필드 | 컬럼 |
+| --- | --- |
+| `results[].member_id` | `member_id` |
+| `results[].risk_score` | `risk_score` |
+| `results[].rule_score` | `rule_score` |
+| `results[].ml_score` | `ml_score` (모델 트랙 가동 전 `null`) |
+| `results[].detail` | `detail` (JSONB) |
+
+`skipped_bidders` 는 **저장하지 않는다.** 이력이 부족해 판정하지 않은 입찰자이며,
+0 점으로 저장하면 신규 사용자일수록 안전해 보이는 왜곡이 생긴다.
+
+`auction_error` 가 있으면 탐지가 실패한 것이지만 **응답 코드는 200 이다.**
+탐지 실패가 경매 종료나 낙찰 처리를 막아서는 안 되기 때문이다.
+
+## 데이터 조회기
+
+규칙 엔진은 DB 를 모른다. `provider.py` 가 그 경계다.
+
+```
+지금   InMemoryProvider   합성 경매 2건. bid 테이블 없이 호출해 볼 수 있다
+나중   PostgresProvider   실제 조회. 엔진과 엔드포인트는 건드리지 않는다
+```
+
+피처 계산식은 AI 쪽에서 가장 자주 바뀌는 부분이다. 백엔드가 데이터를 모아 보내는
+구조였다면 식을 하나 고칠 때마다 백엔드 배포가 필요하다. 그래서 **AI 가 읽기 전용
+계정으로 직접 조회**하는 쪽을 택했다.
+
+데모 경매 — `10001` 정상, `10002` 핑퐁 의심
 
 ---
 
@@ -159,8 +220,9 @@ device fingerprint / IP 를 수집하지 않아 계산이 불가능하다. 컬�
 | --- | --- |
 | `fraud_detection.rule_score` · `ml_score` | 반영됨 |
 | `fraud_detection.detail` (JSONB) | **미반영** — 신규 피처와 규칙별 점수를 저장할 곳이 없다 |
-| `auction.original_end_at` | **삭제됨** — `started_at + auction_time` 으로 유도해야 한다. `auction_time` 의 단위와 불변 여부 확인 필요 |
+| `auction.original_end_at` | 삭제됨. `started_at + auction_time` 으로 유도한다. `auction_time` 은 생성 시 확정되고 연장해도 바뀌지 않음을 확인했다 |
 | `auction.bid_unit` | 삭제됨 — 최소 입찰 단위 기반 피처는 계산 불가 |
+| `auction.live_broadcast_id` | `NOT NULL` — 라이브 밖 경매를 만들 수 없다. nullable 전환 필요 |
 
 ## 앞으로
 
