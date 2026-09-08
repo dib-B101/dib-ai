@@ -70,11 +70,14 @@ class PostgresProvider:
 
     읽기 전용 계정으로 접속하며, 아래 표의 컬럼만 조회한다.
 
-        auction   auction_id, member_id(판매자), category_id, start_price,
-                  started_at, auction_time, ended_at
-        bid       bid_id, auction_id, member_id, amount, created_at
-        member    member_id, created_at
-        history   과거 참여 이력 (bid JOIN auction, created_at < as_of)
+        auction       auction_id, member_id(판매자), category_id, start_price,
+                      started_at, auction_time, ended_at
+        bid           bid_id, auction_id, member_id, amount, created_at
+        member        member_id, created_at
+        history       과거 참여 이력 (bid JOIN auction, created_at < as_of)
+        subscription  subscriber_id, broadcaster_id
+                      구독자가 그 방송자 경매에만 참여하는 것은 정상 행동이라,
+                      R4(판매자 편중)가 이 관계를 보고 판단을 건너뛴다
 
     주의: 모든 이력 조회에 created_at < as_of 조건을 걸어야 한다.
           빠뜨리면 미래 데이터가 섞여 학습·평가에 누수가 생긴다.
