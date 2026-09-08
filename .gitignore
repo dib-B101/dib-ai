@@ -31,3 +31,25 @@ temp/
 .cache/
 .coverage
 coverage/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Model artifacts and outputs
+artifacts/
+*.joblib
+*.pkl
+*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
