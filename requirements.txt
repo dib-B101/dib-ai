@@ -17,3 +17,7 @@ matplotlib
 seaborn
 scipy
 joblib
+
+# ML 트랙
+lightgbm>=4.0
+shap>=0.44

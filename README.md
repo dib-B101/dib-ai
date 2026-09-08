@@ -12,7 +12,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | --- | --- | --- |
 | 이상거래 탐지 — 규칙 기반 베이스라인 | 구현 완료 | `src/fraud/` |
 | 이상거래 탐지 — HTTP API | 구현 완료 | `src/fraud_api/` |
-| 이상거래 탐지 — ML 트랙 | EDA 완료, 서빙 미구현 | `notebooks/` |
+| 이상거래 탐지 — ML 트랙 | 부트스트랩 학습 완료, 서빙 미연결 | `src/fraud_ml/` |
 | 상품 검수 | 미착수 | TBD |
 | 개인화 추천 | 미착수 (라이브 전환에 따라 재설계 필요) | TBD |
 
@@ -30,18 +30,22 @@ dib-ai/
 │   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
 │   │   ├── rules.py          규칙 5종
 │   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
-│   └── fraud_api/            HTTP 계층
-│       ├── main.py           FastAPI 앱 · 엔드포인트
-│       ├── models.py         요청·응답 스키마. 백엔드와의 계약
-│       ├── provider.py       데이터 조회기. DB 가 생기면 여기만 갈아끼운다
-│       └── demo.py           합성 경매. bid 테이블 없이 API 를 호출해 볼 수 있다
+│   ├── fraud_api/            HTTP 계층
+│   │   ├── main.py           FastAPI 앱 · 엔드포인트
+│   │   ├── models.py         요청·응답 스키마. 백엔드와의 계약
+│   │   ├── provider.py       데이터 조회기. DB 가 생기면 여기만 갈아끼운다
+│   │   └── demo.py           합성 경매. bid 테이블 없이 API 를 호출해 볼 수 있다
+│   └── fraud_ml/             ML 트랙 (부트스트랩)
+│       ├── bootstrap.py      학습 · 확률 보정 · 절제 실험
+│       └── explain.py        SHAP 기여도 → 한국어 탐지 사유
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
 │   ├── test_engine.py        티켓 완료 조건 검증
 │   └── test_api.py           API 계약 검증
 ├── scripts/
-│   └── run_scenarios.py      시나리오 실행 데모
+│   ├── run_scenarios.py      규칙 시나리오 실행 데모
+│   └── train_bootstrap_model.py   ML 부트스트랩 학습
 ├── notebooks/
 │   └── shill_bidding_eda.ipynb   eBay 데이터셋 EDA
 ├── data/
@@ -58,8 +62,9 @@ dib-ai/
 python -m venv .venv && .venv/Scripts/activate   # Windows
 pip install -r requirements.txt
 
-python -m pytest                    # 테스트 40개
-python scripts/run_scenarios.py     # 시나리오별 점수 확인
+python -m pytest                        # 테스트 40개
+python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
+python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
 # API 서버
 PYTHONPATH=src uvicorn fraud_api.main:app --reload --port 8000
@@ -211,6 +216,85 @@ device fingerprint / IP 를 수집하지 않아 계산이 불가능하다. 컬�
 
 밴드 임계값(`config/rules.yaml` 의 `bands`)이나 결합 방식(가중 평균 → 최댓값 등)은
 관리자 검토 큐의 실제 물량을 보고 조정한다.
+
+---
+
+# ML 트랙 (부트스트랩)
+
+`python scripts/train_bootstrap_model.py`
+
+**이 모델은 배포용이 아니다.** eBay 데이터셋은 도메인이 달라 성능 숫자를 그대로
+인용할 수 없다. 목적은 파이프라인 검증과 서빙 입력 스키마 확정이다.
+
+## 절제 실험
+
+| 구성 | 피처 | PR-AUC | Precision | Recall |
+| --- | --- | --- | --- | --- |
+| A. 전체 | 9개 | 0.9947 | 0.995 | 0.990 |
+| B. `Successive_Outbidding` 제외 | 8개 | 0.6791 | 0.519 | 0.911 |
+| **C. B + `Bidder_Tendency` 제외** | **7개** | **0.6983** | **0.615** | 0.792 |
+| D. 상위 3개만 | 3개 | 0.5800 | 0.523 | 0.776 |
+
+무작위 기준선 PR-AUC = 0.0965
+
+**A 의 0.99 는 인용하지 말 것.** `Successive_Outbidding` 이 라벨과 거의 일대일로
+붙어 있어서 나오는 숫자다. `SO > 0` 이라는 if 문 한 줄만으로 shill 675건 중 673건이
+잡힌다. 그리고 그 피처는 우리 정책상 항상 0 이라 쓸 수 없다.
+
+## 왜 C 를 채택했나
+
+`Bidder_Tendency`(판매자 편중도)를 빼면 **성능과 정밀도가 함께 올랐다.**
+
+```
+PR-AUC     0.6791 → 0.6983   (+2.8%)
+Precision  0.519  → 0.615    (+18.5%)
+```
+
+원래는 구독 충돌을 피하려고 성능을 포기하는 트레이드오프로 봤는데, 실제로는 순이득이었다.
+
+> 라이브 구독 모델에서는 구독자가 좋아하는 방송자의 경매에만 참여하는 것이 **정상**이다.
+> eBay 모델은 "판매자 편중이 높으면 위험" 으로 배우므로, 그대로 두면 **충성 고객이
+> 고위험으로 찍힌다.**
+
+관리자 검토 큐는 재현율보다 정밀도가 중요하다. 오탐 한 건마다 사람이 시간을 쓴다.
+
+같은 이유로 규칙 엔진의 `R4_SELLER_CONCENTRATION` 도 재검토 대상이다.
+
+## 확률 보정
+
+```
+Brier  0.0554 → 0.0447   (보정 후 19% 개선)
+```
+
+정책의 `0.3 / 0.6` 등급 경계는 **보정된 확률에서만 의미가 있다.** 보정 전 점수로
+밴드를 나누면 "0.6" 이 위험도 60% 를 뜻하지 않는다.
+
+`sklearn 1.6` 에서 `cv="prefit"` 이 제거되어 `FrozenEstimator` 로 감싼다.
+
+## 탐지 사유
+
+`explain.py` 가 SHAP 기여도를 한국어 문장으로 바꾼다. 규칙 엔진의 `reasons()` 와
+형태를 맞춰 관리자 화면에서 두 트랙을 나란히 보여줄 수 있다.
+
+```
+· 이 경매의 입찰을 많이 차지했습니다        (기여 +6.546, 값 0.4444)
+· 참여한 경매 대비 낙찰이 적습니다          (기여 +2.120, 값 1.0)
+```
+
+문장은 **저장하지 않고 조회 시 생성**한다. 피처값과 기여도만 있으면 다시 만들 수 있고,
+문구를 고칠 때 과거 데이터를 건드릴 필요가 없다.
+
+## 운영 관점
+
+최적점이 Precision 0.615 / Recall 0.792 다. **고위험 판정 1.6건 중 1건만 실제 의심**이라
+자동 제재는 불가능하고 관리자 검토 큐 정렬용이다.
+
+## 서빙 계약
+
+`artifacts/model_meta.json` 의 `serving_features_contract` 가 백엔드가 준비해야 할
+값이다. 학습 피처와 일치하는지 스크립트가 매번 확인한다.
+
+---
 
 ## ERD 의존성
 
