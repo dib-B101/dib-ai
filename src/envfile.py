@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 
 log = logging.getLogger("envfile")
@@ -19,7 +20,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def load_env(path: Path | None = None) -> Path | None:
-    """읽은 파일 경로. 없거나 python-dotenv 가 없으면 None."""
+    """읽은 파일 경로. 없거나 python-dotenv 가 없으면 None.
+
+    ``DIB_SKIP_DOTENV`` 가 설정되어 있으면 읽지 않는다. 테스트가 개발자의 로컬
+    설정에 따라 결과가 달라지거나, 실수로 진짜 API 를 호출하는 것을 막는다.
+    """
+    if os.getenv("DIB_SKIP_DOTENV"):
+        return None
+
     target = path or ROOT / ".env"
     if not target.exists():
         return None

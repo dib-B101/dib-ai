@@ -10,10 +10,12 @@ import pytest
 
 from moderation.keywords import KeywordFilter
 from moderation.llm import (
+    GeminiModerationLLM,
     LLMVerdict,
     OpenAIModerationLLM,
     build_content,
     build_openai_content,
+    _gemini_text,
     create_llm,
     loads_lenient,
     parse_verdict,
@@ -236,7 +238,7 @@ def test_create_llm_picks_provider_from_env(monkeypatch):
 
 
 def test_create_llm_rejects_unknown_provider(monkeypatch):
-    monkeypatch.setenv("MODERATION_PROVIDER", "gemini")
+    monkeypatch.setenv("MODERATION_PROVIDER", "llama")
     with pytest.raises(ValueError, match="알 수 없는"):
         create_llm()
 
@@ -317,3 +319,63 @@ def test_unknown_verdict_raises_so_pipeline_holds():
     data = {"verdict": "허용", "category": None, "confidence": 0.9, "reason": ""}
     with pytest.raises(ValueError, match="알 수 없는 판정값"):
         parse_verdict(data, "m")
+
+
+# ---------------------------------------------------------------- Gemini 네이티브
+
+def test_gemini_url_follows_google_shape(monkeypatch):
+    """게이트웨이는 벤더 주소를 그대로 뒤에 붙인다. 경로가 틀리면 404 가 난다."""
+    llm = GeminiModerationLLM(
+        model="gemini-3.5-flash",
+        base_url="https://gms.ssafy.io/gmsapi/generativelanguage.googleapis.com/v1beta/",
+        api_key="k",
+    )
+    assert llm.url == (
+        "https://gms.ssafy.io/gmsapi/generativelanguage.googleapis.com"
+        "/v1beta/models/gemini-3.5-flash:generateContent"
+    )
+
+
+def test_gemini_payload_uses_google_field_names():
+    """OpenAI 형식과 필드 이름이 전혀 다르다. 섞이면 400 이다."""
+    llm = GeminiModerationLLM(api_key="k")
+    payload = llm._payload(_product(), hint="담배/전자담배(description)")
+
+    assert "system_instruction" in payload
+    assert payload["contents"][0]["parts"][-1]["text"].startswith("상품명:")
+
+    schema = payload["generationConfig"]["responseSchema"]
+    assert schema["properties"]["category"] == {"type": "string", "nullable": True}
+    assert "additionalProperties" not in schema, "구글은 이 키를 모른다"
+
+
+def test_gemini_text_extraction():
+    body = {
+        "candidates": [
+            {"content": {"parts": [{"text": '{"verdict":"정상"}'}]}, "finishReason": "STOP"}
+        ]
+    }
+    assert _gemini_text(body) == '{"verdict":"정상"}'
+
+
+@pytest.mark.parametrize(
+    "body, match",
+    [
+        ({"promptFeedback": {"blockReason": "SAFETY"}}, "안전 필터"),
+        ({"candidates": []}, "candidates"),
+        ({"candidates": [{"finishReason": "RECITATION", "content": {}}]}, "중단"),
+    ],
+)
+def test_gemini_failures_raise_so_pipeline_holds(body, match):
+    """실패를 조용히 삼키면 미탐이 된다. 예외로 올려 보류시킨다."""
+    with pytest.raises(RuntimeError, match=match):
+        _gemini_text(body)
+
+
+def test_gemini_provider_is_selectable(monkeypatch):
+    monkeypatch.setenv("MODERATION_PROVIDER", "gemini")
+    monkeypatch.setenv("GEMINI_API_KEY", "k")
+    monkeypatch.delenv("MODERATION_MODEL", raising=False)
+
+    llm = create_llm()
+    assert llm.name == "gemini" and llm._model == "gemini-3.5-flash"

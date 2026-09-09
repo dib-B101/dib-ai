@@ -38,6 +38,10 @@ log = logging.getLogger("moderation.llm")
 
 ANTHROPIC_MODEL = "claude-opus-5"
 OPENAI_MODEL = "gpt-4o"
+GEMINI_MODEL = "gemini-3.5-flash"
+
+# 구글 공식 주소. 사내 게이트웨이를 쓰면 GEMINI_BASE_URL 로 덮어쓴다.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
 
 # 이미지 토큰은 대략 (가로 × 세로) / 750 이다.
 # 1024px 6장이면 약 4,200 토큰이지만 512px 로 줄이면 약 1,050 토큰이다.
@@ -89,6 +93,23 @@ RESPONSE_SCHEMA = {
     },
     "required": ["verdict", "category", "confidence", "reason"],
     "additionalProperties": False,
+}
+
+# 같은 계약을 구글 방식으로 다시 쓴 것. 필드와 의미는 위와 동일하다.
+#
+# 구글은 OpenAPI 스키마의 부분집합만 받는다. ``additionalProperties`` 를 모르고,
+# nullable 을 ``["string", "null"]`` 이 아니라 ``nullable: true`` 로 쓴다.
+# 위 스키마를 그대로 보내면 400 이 난다.
+GEMINI_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdict": {"type": "string", "enum": ["정상", "검토 필요", "금지"]},
+        "category": {"type": "string", "nullable": True},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string"},
+    },
+    "required": ["verdict", "category", "confidence", "reason"],
+    "propertyOrdering": ["verdict", "category", "confidence", "reason"],
 }
 
 # 스키마를 강제할 수 없는 엔드포인트에서 형식을 지시하는 문구.
@@ -289,11 +310,15 @@ class AnthropicModerationLLM:
 
     name = "anthropic"
 
-    def __init__(self, client=None, model: str = ANTHROPIC_MODEL) -> None:
+    def __init__(
+        self, client=None, model: str = ANTHROPIC_MODEL, base_url: str | None = None
+    ) -> None:
         if client is None:
             import anthropic
 
-            client = anthropic.Anthropic()
+            client = anthropic.Anthropic(
+                base_url=base_url or os.getenv("ANTHROPIC_BASE_URL")
+            )
         self._client = client
         self._model = model
 
@@ -395,11 +420,104 @@ class OpenAIModerationLLM:
         )
 
 
+class GeminiModerationLLM:
+    """Google 네이티브 ``generateContent`` 호출.
+
+    OpenAI 형식이 아니다. 사내 게이트웨이가 벤더 주소를 그대로 뒤에 붙이는 방식이면
+    Gemini 는 구글 원래 API 모양으로 와야 한다.
+
+        {base_url}/models/{model}:generateContent
+
+    SDK 대신 httpx 로 직접 부른다. 게이트웨이 주소는 표준 형태가 아니라
+    (``.../gmsapi/generativelanguage.googleapis.com/v1beta``) SDK 가 받아주지 않는
+    경우가 많고, 어차피 요청 한 종류뿐이라 얻을 게 없다.
+
+    인증 헤더를 두 가지로 함께 보낸다. 게이트웨이가 자체 키를 ``Authorization`` 으로
+    받는지 구글 방식대로 ``x-goog-api-key`` 로 받는지 알 수 없어서다. 둘 다 보내면
+    어느 쪽이든 통하고, 쓰지 않는 헤더는 무시된다.
+    """
+
+    name = "gemini"
+
+    def __init__(
+        self,
+        model: str = GEMINI_MODEL,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        timeout: float = 60.0,
+    ) -> None:
+        self._model = model
+        self._base_url = (base_url or os.getenv("GEMINI_BASE_URL") or GEMINI_BASE_URL).rstrip("/")
+        self._api_key = api_key or os.getenv("GEMINI_API_KEY") or ""
+        self._timeout = timeout
+
+    @property
+    def url(self) -> str:
+        return f"{self._base_url}/models/{self._model}:generateContent"
+
+    def _payload(self, product: ProductInput, hint: str | None) -> dict:
+        parts: list[dict] = [
+            {"inline_data": {"mime_type": "image/jpeg", "data": data}}
+            for data in _encoded_images(product)
+        ]
+        parts.append({"text": build_text(product, hint)})
+        return {
+            "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
+            "contents": [{"role": "user", "parts": parts}],
+            "generationConfig": {
+                "responseMimeType": "application/json",
+                "responseSchema": GEMINI_RESPONSE_SCHEMA,
+                "maxOutputTokens": 1024,
+                "temperature": 0,
+            },
+        }
+
+    def judge(self, product: ProductInput, hint: str | None = None) -> LLMVerdict:
+        import httpx
+
+        response = httpx.post(
+            self.url,
+            json=self._payload(product, hint),
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "x-goog-api-key": self._api_key,
+                "Content-Type": "application/json",
+            },
+            timeout=self._timeout,
+        )
+        if response.status_code >= 400:
+            # 본문을 함께 올린다. 게이트웨이 오류는 상태코드만으로 원인을 모른다.
+            raise RuntimeError(
+                f"Gemini 호출 실패 {response.status_code}: {response.text[:500]}"
+            )
+
+        return parse_verdict(loads_lenient(_gemini_text(response.json())), self._model)
+
+
+def _gemini_text(body: dict) -> str:
+    """응답에서 본문 텍스트를 꺼낸다. 안전 필터에 걸리면 예외로 올린다."""
+    if blocked := body.get("promptFeedback", {}).get("blockReason"):
+        raise RuntimeError(f"입력이 안전 필터에 걸렸습니다: {blocked}")
+
+    candidates = body.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"응답에 candidates 가 없습니다: {str(body)[:300]}")
+
+    candidate = candidates[0]
+    reason = candidate.get("finishReason")
+    if reason and reason not in ("STOP", "MAX_TOKENS"):
+        raise RuntimeError(f"생성이 중단되었습니다: {reason}")
+
+    parts = candidate.get("content", {}).get("parts") or []
+    return "".join(p.get("text", "") for p in parts)
+
+
 # ------------------------------------------------------------------ 선택
 
 _PROVIDERS: dict[str, tuple[type, str, str]] = {
     "anthropic": (AnthropicModerationLLM, "ANTHROPIC_API_KEY", ANTHROPIC_MODEL),
     "openai": (OpenAIModerationLLM, "OPENAI_API_KEY", OPENAI_MODEL),
+    "gemini": (GeminiModerationLLM, "GEMINI_API_KEY", GEMINI_MODEL),
 }
 
 
@@ -408,13 +526,16 @@ def create_llm(
 ) -> ModerationLLM | None:
     """환경변수로 검수 모델을 고른다.
 
-        MODERATION_PROVIDER=openai      생략하면 키가 있는 쪽을 자동 선택
+        MODERATION_PROVIDER=gemini          생략하면 키가 있는 쪽을 자동 선택
         MODERATION_MODEL=gemini-3.5-flash   생략하면 벤더 기본값
-        MODERATION_JSON_MODE=schema     schema | object (openai 계열만)
-        OPENAI_BASE_URL=https://.../v1  사내 게이트웨이를 쓸 때
+        MODERATION_JSON_MODE=schema         schema | object (openai 계열만)
 
-    OpenAI 호환 게이트웨이는 ``openai`` 제공자에 ``OPENAI_BASE_URL`` 만 지정하면
-    된다. 그 뒤로는 모델 이름만 바꿔 GPT·Gemini·Claude 를 오간다.
+    제공자는 **API 형식**을 고르는 것이지 벤더를 고르는 것이 아니다. 사내 게이트웨이가
+    벤더 주소를 그대로 뒤에 붙이는 방식이면 셋을 이렇게 나눠 쓴다.
+
+        gemini      {GEMINI_BASE_URL}/models/{model}:generateContent
+        openai      {OPENAI_BASE_URL}/chat/completions
+        anthropic   {ANTHROPIC_BASE_URL}/v1/messages
 
     키가 하나도 없으면 None 을 돌려주고 파이프라인은 모든 상품을 "검토 필요"로
     보류한다. **키가 없다고 서버가 죽지는 않는다** — 1차 규칙 필터는 그대로

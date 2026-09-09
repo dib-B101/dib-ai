@@ -58,7 +58,8 @@ dib-ai/
 │   ├── test_engine.py        티켓 완료 조건 검증
 │   ├── test_api.py           탐지 API 계약 검증
 │   ├── test_moderation.py    검수 파이프라인 검증
-│   └── test_moderation_api.py  검수 API 계약 검증
+│   ├── test_moderation_api.py  검수 API 계약 검증
+│   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
 │   ├── train_bootstrap_model.py   ML 부트스트랩 학습
@@ -82,7 +83,7 @@ pip install -r requirements.txt
 
 cp .env.example .env                    # 그리고 API 키를 채운다
 
-python -m pytest                        # 테스트 93개
+python -m pytest                        # 테스트 100개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
@@ -459,83 +460,73 @@ LLM 만이 **왜 막았는지 한국어로 설명**한다는 점도 크다. 그 
 스키마가 공용이라 환경변수로 갈아끼운다.
 
 ```bash
-MODERATION_PROVIDER=openai            # anthropic | openai. 생략하면 키 있는 쪽 자동 선택
-MODERATION_MODEL=gemini-3.5-flash     # 생략하면 벤더 기본값
-MODERATION_JSON_MODE=schema           # schema | object
-OPENAI_API_KEY=...                    # 또는 ANTHROPIC_API_KEY
-OPENAI_BASE_URL=https://.../v1        # 사내 게이트웨이를 쓸 때만
+MODERATION_PROVIDER=gemini            # gemini | openai | anthropic
+MODERATION_MODEL=gemini-3.5-flash     # 화면 표기가 아니라 API 용 모델 ID
+GEMINI_BASE_URL=https://.../v1beta
+GEMINI_API_KEY=...
 ```
 
-### OpenAI 호환 게이트웨이
+설정은 `.env` 에 넣는다. `.env.example` 을 복사해 값만 채우면 된다.
 
-`OPENAI_BASE_URL` 만 지정하면 **하나의 엔드포인트로 GPT·Gemini·Claude 를 모두** 부른다.
-벤더별 클라이언트를 따로 만들 필요가 없고, 모델 교체는 `MODERATION_MODEL` 한 줄이다.
+### 제공자는 벤더가 아니라 **API 형식**을 고르는 것이다
 
-다만 게이트웨이가 OpenAI 를 그대로 중계하지 않는 경우가 많다. Gemini·Claude 를 OpenAI
-형식으로 감싼 엔드포인트는 `json_schema` 를 거절하고 `json_object` 만 받는 일이 흔하다.
-그래서 두 방식을 지원한다.
+사내 게이트웨이(SSAFY GMS)는 원래 벤더 주소를 그대로 뒤에 붙이는 방식이다.
+
+```
+https://gms.ssafy.io/gmsapi/generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent
+                     └────────────── 구글 원래 주소를 그대로 ──────────────┘
+```
+
+그래서 **모든 모델을 한 형식으로 부를 수 없다.** 부르려는 모델의 벤더에 맞춰 골라야 한다.
+
+| 제공자 | 호출 형태 | 어댑터 |
+| --- | --- | --- |
+| `gemini` | `{base}/models/{모델}:generateContent` | `GeminiModerationLLM` — httpx 직접 호출 |
+| `openai` | `{base}/chat/completions` | `OpenAIModerationLLM` — openai SDK |
+| `anthropic` | `{base}/v1/messages` | `AnthropicModerationLLM` — anthropic SDK |
+
+세 어댑터가 **같은 프롬프트와 같은 판정 계약**을 쓴다. 파이프라인은 어느 쪽인지 모른다.
+벤더별 차이는 어댑터 안에만 있다.
+
+| | Anthropic | OpenAI | Gemini |
+| --- | --- | --- | --- |
+| 구조화 출력 | `output_config.format` | `response_format.json_schema` | `generationConfig.responseSchema` |
+| 이미지 블록 | `source.base64` | `image_url` (data URI) | `inline_data` |
+| 프롬프트 캐싱 | `cache_control` 로 지점 지정 | 1,024 토큰 초과 시 자동 | 없음 |
+| 이미지 토큰 | (가로 × 세로) / 750 | `detail: low` 로 85 토큰 고정 | 258 토큰 고정 |
+
+이미지는 512px 로 줄여 보낸다. 담배갑·술병·약통 식별에는 충분하고 입력이 절반 이하로
+줄어든다.
+
+### 스키마 방언
+
+Gemini 는 OpenAPI 스키마의 부분집합만 받는다. `additionalProperties` 를 모르고,
+nullable 을 `["string", "null"]` 이 아니라 `nullable: true` 로 쓴다. 그래서 같은 계약을
+`RESPONSE_SCHEMA` 와 `GEMINI_RESPONSE_SCHEMA` 로 두 번 적어 둔다 — 한쪽을 그대로 보내면
+400 이 난다.
+
+OpenAI 형식 쪽에는 `MODERATION_JSON_MODE` 가 있다. 게이트웨이가 `json_schema` 를 거절하면
+`object` 로 바꾼다.
 
 | `MODERATION_JSON_MODE` | 동작 |
 | --- | --- |
 | `schema` (기본) | `json_schema` + `strict`. 스키마를 벗어난 응답을 아예 생성하지 못한다 |
 | `object` | `json_object`. 스키마를 프롬프트로 지시하고 파싱은 우리가 검증한다 |
 
-`object` 모드에서는 응답에 ```` ```json ```` 펜스나 앞뒤 설명이 섞여 나오므로, 가장 바깥
-중괄호 쌍만 잘라 파싱한다. 판정 문자열도 `검토필요` 처럼 띄어쓰기가 달라질 수 있어
-흡수한다 — 표기 차이 하나로 검수 전체가 실패할 이유는 없다. 반대로 **모르는 판정값은
-예외로 올린다.** 정상으로 흘려보내면 미탐이 되기 때문이다.
+`object` 모드에서는 응답에 코드 펜스나 앞뒤 설명이 섞여 나오므로 가장 바깥 중괄호 쌍만
+잘라 파싱한다. 판정 문자열도 `검토필요` 처럼 띄어쓰기가 달라질 수 있어 흡수한다 — 표기
+차이 하나로 검수 전체가 실패할 이유는 없다. 반대로 **모르는 판정값은 예외로 올린다.**
+정상으로 흘려보내면 미탐이 되기 때문이다.
 
-어느 모드가 되는지는 한 번 확인하면 된다.
+### 연결 점검
 
 ```bash
 python scripts/check_moderation_llm.py
 ```
 
 우회 표현·부정문·연상 물건 7개 사례를 실제로 호출해 판정·확신도·소요 시간을 출력한다.
-연결 확인과 프롬프트 품질 점검을 겸한다.
-
-**키가 없어도 서버는 뜬다.** 1차 규칙 필터는 그대로 동작하므로 명백한 위반은 계속
-걸러지고, 나머지는 전부 "검토 필요"로 보류된다.
-
-벤더별 차이는 어댑터 안에만 있다.
-
-| | Anthropic | OpenAI |
-| --- | --- | --- |
-| 구조화 출력 | `output_config.format` | `response_format.json_schema` (`strict: true`) |
-| 이미지 블록 | `source.base64` | `image_url` (data URI) |
-| 프롬프트 캐싱 | `cache_control` 로 지점 지정 | 1,024 토큰 초과 시 자동 |
-| 이미지 토큰 | (가로 × 세로) / 750 | `detail: low` 로 85 토큰 고정 |
-
-이미지는 512px 로 줄여 보낸다. 담배갑·술병·약통 식별에는 충분하고 입력이 절반 이하로
-줄어든다.
-
-## API
-
-```
-POST /internal/moderation/review   상품 1건 검수
-GET  /moderation/health            헬스체크
-```
-
-상품 등록·수정 시 호출한다. **판정만 하고 상태를 바꾸지 않는다** — 자동 차단 여부는
-백엔드 정책이다.
-
-응답에 `product_status` 를 함께 담는다. 백엔드가 "검토 필요가 어느 상태였더라" 를
-매번 찾아보지 않게 하려는 것이다.
-
-| `verdict` | `product_status` |
-| --- | --- |
-| 정상 | `REGISTERED` |
-| 검토 필요 | `PENDING` |
-| 금지 | `REJECTED` |
-
-`stage` 가 어디서 결정되었는지 알려준다 — `rule` 은 1차 필터가 AI 없이 끝낸 것,
-`ai` 는 2차 판정, `fallback` 은 AI 호출이 실패해 보류된 것이다.
-
-**검수 실패로 500 을 내지 않는다.** AI 가 죽어도 200 으로 `검토 필요`를 돌려준다.
-검수 장애가 상품 등록을 막아서는 안 된다.
-
-이미지는 http(s) URL 과 로컬 경로를 모두 받는다. 내려받지 못한 이미지는 조용히
-건너뛰고 나머지로 판정한다.
+연결 확인과 프롬프트 품질 점검을 겸한다. 게이트웨이 오류는 상태코드만으로 원인을 알 수
+없어 응답 본문을 함께 보여준다.
 
 ## 설계 원칙
 
