@@ -5,7 +5,7 @@
 백엔드 입장에서 AI 는 서비스 하나다. 포트를 두 개 열면 서비스 등록도 헬스체크도
 두 벌이 되므로, 배포는 이 앱 하나로 한다. `/docs` 에 두 API 가 함께 나온다.
 
-개별 앱(`fraud_api.main:app`, `moderation_api.main:app`)도 그대로 살아 있다.
+개별 앱(`fraud_api.main:app`, `moderation_api.main:app`, `reco_api.main:app`)도 그대로 살아 있다.
 한쪽만 띄워 시험할 때 쓴다.
 """
 
@@ -21,6 +21,8 @@ from fraud_api.main import lifespan as fraud_lifespan
 from fraud_api.main import router as fraud_router
 from moderation_api.main import lifespan as moderation_lifespan
 from moderation_api.main import router as moderation_router
+from reco_api.main import lifespan as reco_lifespan
+from reco_api.main import router as reco_router
 
 log = logging.getLogger("serve")
 
@@ -34,7 +36,7 @@ async def lifespan(app: FastAPI):
     예외가 올라온다면 정말로 뜨면 안 되는 상태다.
     """
     load_env()
-    async with fraud_lifespan(app), moderation_lifespan(app):
+    async with fraud_lifespan(app), moderation_lifespan(app), reco_lifespan(app):
         yield
 
 
@@ -52,3 +54,4 @@ app = FastAPI(
 
 app.include_router(fraud_router)
 app.include_router(moderation_router)
+app.include_router(reco_router)
