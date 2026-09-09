@@ -4,6 +4,7 @@ pyyaml>=6.0
 # API
 fastapi>=0.110
 uvicorn[standard]>=0.27
+python-dotenv>=1.0   # .env 로 키·모델 설정
 
 # 테스트
 pytest>=8.0
@@ -21,3 +22,9 @@ joblib
 # ML 트랙
 lightgbm>=4.0
 shap>=0.44
+
+# 상품 검수
+pyahocorasick>=2.0   # 금칙어 다중 패턴 매칭
+pillow>=10.0         # 이미지 리사이즈 (토큰 절감)
+anthropic>=0.40      # 2차 AI 검수 — Claude
+openai>=1.40         # 2차 AI 검수 — GPT (둘 중 하나만 있어도 동작)

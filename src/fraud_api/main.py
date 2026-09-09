@@ -23,7 +23,7 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 
 from fraud import RuleConfig, combine, detect
 
@@ -38,6 +38,9 @@ log = logging.getLogger("fraud_api")
 # 우리 도메인에서 검증된 적이 없으므로, 가동하더라도 규칙 쪽에 더 무게를 둔다.
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
+
+# 라우터로 분리해 두면 검수 API 와 한 서버에 합쳐 띄울 수 있다 (src/serve.py).
+router = APIRouter()
 
 _state: dict[str, object] = {}
 
@@ -87,7 +90,7 @@ def get_provider() -> InputProvider:
     return provider  # type: ignore[return-value]
 
 
-@app.get("/health", response_model=HealthResponse, tags=["ops"])
+@router.get("/health", response_model=HealthResponse, tags=["ops"])
 def health(cfg: RuleConfig = Depends(get_config)) -> HealthResponse:
     """인프라가 감시할 헬스체크. 설정이 로드되고 규칙이 하나라도 켜져 있어야 ok 다."""
     provider: InputProvider = get_provider()
@@ -99,7 +102,7 @@ def health(cfg: RuleConfig = Depends(get_config)) -> HealthResponse:
     )
 
 
-@app.post(
+@router.post(
     "/internal/fraud/detect",
     response_model=DetectResponse,
     tags=["fraud"],
@@ -151,3 +154,6 @@ def detect_auction(
         skipped_bidders=dict(result.skipped_bidders),
         auction_error=result.auction_error,
     )
+
+
+app.include_router(router)

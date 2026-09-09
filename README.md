@@ -13,7 +13,9 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 이상거래 탐지 — 규칙 기반 베이스라인 | 구현 완료 | `src/fraud/` |
 | 이상거래 탐지 — HTTP API | 구현 완료 | `src/fraud_api/` |
 | 이상거래 탐지 — ML 트랙 | 부트스트랩 학습 완료, 서빙 미연결 | `src/fraud_ml/` |
-| 상품 검수 | 미착수 | TBD |
+| 상품 검수 — 1차 규칙 필터 | 구현 완료 | `src/moderation/` |
+| 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
+| 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
 | 개인화 추천 | 미착수 (라이브 전환에 따라 재설계 필요) | TBD |
 
 ## 폴더 구조
@@ -21,7 +23,8 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 ```
 dib-ai/
 ├── config/
-│   └── rules.yaml            임계값·가중치. 코드 수정 없이 조정한다
+│   ├── rules.yaml            임계값·가중치. 코드 수정 없이 조정한다
+│   └── banned_keywords.yaml  금칙어 사전. 운영 중 추가는 여기만 고친다
 ├── src/
 │   ├── fraud/                규칙 엔진 (라이브러리)
 │   │   ├── __init__.py       공개 API (RuleConfig, detect, combine)
@@ -30,26 +33,42 @@ dib-ai/
 │   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
 │   │   ├── rules.py          규칙 5종
 │   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
+│   ├── serve.py              두 API 를 한 서버에 띄우는 진입점
+│   ├── envfile.py            .env 로더
 │   ├── fraud_api/            HTTP 계층
 │   │   ├── main.py           FastAPI 앱 · 엔드포인트
 │   │   ├── models.py         요청·응답 스키마. 백엔드와의 계약
 │   │   ├── provider.py       데이터 조회기. DB 가 생기면 여기만 갈아끼운다
 │   │   └── demo.py           합성 경매. bid 테이블 없이 API 를 호출해 볼 수 있다
-│   └── fraud_ml/             ML 트랙 (부트스트랩)
-│       ├── bootstrap.py      학습 · 확률 보정 · 절제 실험
-│       └── explain.py        SHAP 기여도 → 한국어 탐지 사유
+│   ├── fraud_ml/             ML 트랙 (부트스트랩)
+│   │   ├── bootstrap.py      학습 · 확률 보정 · 절제 실험
+│   │   └── explain.py        SHAP 기여도 → 한국어 탐지 사유
+│   ├── moderation/           상품 검수 (라이브러리)
+│   │   ├── schema.py         입출력 자료구조. DB 도 HTTP 도 모른다
+│   │   ├── normalize.py      한글 우회 표현 정규화
+│   │   ├── keywords.py       Aho-Corasick 금칙어 필터
+│   │   ├── llm.py            2차 AI 검수. 벤더 교체 가능
+│   │   └── pipeline.py       1차 → 2차 오케스트레이션
+│   └── moderation_api/       HTTP 계층
+│       ├── main.py           엔드포인트
+│       └── models.py         요청·응답 스키마. 백엔드와의 계약
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
 │   ├── test_engine.py        티켓 완료 조건 검증
-│   └── test_api.py           API 계약 검증
+│   ├── test_api.py           탐지 API 계약 검증
+│   ├── test_moderation.py    검수 파이프라인 검증
+│   ├── test_moderation_api.py  검수 API 계약 검증
+│   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
-│   └── train_bootstrap_model.py   ML 부트스트랩 학습
+│   ├── train_bootstrap_model.py   ML 부트스트랩 학습
+│   └── check_moderation_llm.py    검수 모델 실호출 점검
 ├── notebooks/
 │   └── shill_bidding_eda.ipynb   eBay 데이터셋 EDA
 ├── data/
 │   └── Shill Bidding Dataset.csv
+├── .env.example              키·모델 설정 서식. 복사해서 .env 로 쓴다
 ├── pytest.ini
 └── requirements.txt
 ```
@@ -62,14 +81,35 @@ dib-ai/
 python -m venv .venv && .venv/Scripts/activate   # Windows
 pip install -r requirements.txt
 
-python -m pytest                        # 테스트 44개
+cp .env.example .env                    # 그리고 API 키를 채운다
+
+python -m pytest                        # 테스트 100개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
-# API 서버
-PYTHONPATH=src uvicorn fraud_api.main:app --reload --port 8000
+# API 서버 — 탐지와 검수를 함께 띄운다
+PYTHONPATH=src uvicorn serve:app --reload --port 8000
 #   http://localhost:8000/docs   ← 백엔드는 여기를 보고 연동한다
 ```
+
+### 설정은 `.env` 로 한다
+
+키를 코드에 적지 않기 위해서다. `.env.example` 을 복사해 값만 채우면 된다.
+
+```bash
+cp .env.example .env
+```
+
+`.env` 는 `.gitignore` 에 있어 커밋되지 않는다. 이미 설정된 환경변수를 덮어쓰지
+않으므로, 배포 환경에서는 컨테이너가 넣은 값이 그대로 이긴다.
+
+### 왜 서버가 하나인가
+
+백엔드 입장에서 AI 는 서비스 하나다. 포트를 두 개 열면 서비스 등록도 헬스체크도
+두 벌이 된다. 그래서 배포는 `serve:app` 하나로 하고, `/docs` 에 두 API 가 함께 나온다.
+
+개별 앱(`fraud_api.main:app`, `moderation_api.main:app`)도 그대로 살아 있어 한쪽만
+띄워 시험할 수 있다.
 
 ---
 
@@ -336,3 +376,198 @@ Brier  0.0554 → 0.0447   (보정 후 19% 개선)
 | `AUCTION_CLOSED` 이벤트 후 | 탐지 트리거를 이벤트 구독으로 전환 |
 | `BID_FAILED` 이벤트 후 | R1 강화 — 실패한 입찰 시도까지 포함 |
 | 관리자 라벨 축적 후 | `rule_score` 와 `ml_score` 를 각각 채점해 가중치 재설정 |
+
+---
+
+# 상품 검수
+
+**거래 제한 품목인지만 판정한다.** 상품 정보 불일치(사진과 설명이 다르다, 가격이
+이상하다)는 검수 범위가 아니다.
+
+## 2단 구조
+
+```
+상품 등록
+    ↓
+1차 규칙 필터  (0.001초, 무료)
+    ├─ BLOCK     제목에 금칙어 그대로     → AI 호출 없이 즉시 차단
+    ├─ ESCALATE  설명에만 / 우회 의심     → 신호를 붙여 AI 로
+    └─ PASS      아무것도 안 걸림         → 일반 AI 검수
+    ↓
+2차 AI 검수  (멀티모달 LLM, 상품명 + 설명 + 이미지)
+    ↓
+confidence 로 등급 조정
+    ↓
+정상(REGISTERED) / 검토 필요(PENDING) / 금지(REJECTED)
+```
+
+1차의 목적은 **AI 호출을 줄이는 것**이다. 명백한 위반은 여기서 끝내고 애매한 것만
+LLM 으로 넘긴다. 금칙어가 수천 개로 늘어도 텍스트를 한 번만 훑도록 Aho-Corasick 을
+쓴다 — 정규식 반복문은 금칙어 수에 비례해 느려진다.
+
+## 왜 통과/차단 2단이 아닌가
+
+처음에는 2단으로 만들었는데 이런 게 걸렸다.
+
+```
+"명품 가방 판매"  /  "레플리카 아닙니다"
+"캠핑용 나이프"   /  "사시미칼 아니고 캠핑용입니다"
+```
+
+정상 판매자가 흔히 쓰는 문구다. **규칙은 부정문을 읽지 못하므로 판단하지 말고 LLM 에
+넘긴다.** 그래서 `BLOCK` / `ESCALATE` / `PASS` 3단이다.
+
+## 우회 표현 정규화
+
+단순 문자열 포함 검사는 30초면 뚫린다.
+
+| 우회 방식 | 예시 | 대응 |
+| --- | --- | --- |
+| 특수문자 삽입 | `전.자.담.배` | 기호 제거 |
+| 공백 삽입 | `전 자 담 배` | 공백 제거 |
+| 자모 분리 | `ㄷㅏㅁㅂㅐ` | 음절 재조합 |
+| 전각 문자 | `담배` | NFKC |
+| 유사 문자 | `CH마초` | 유사 문자 치환 |
+
+자모 재조합은 직접 구현했다. NFKC 에 맡기면 `ㄷㅏㅁㅂㅐ` 가 `다ᄆ배` 가 된다 —
+왼쪽부터 탐욕적으로 합치느라 `ㅁ` 을 종성으로 붙이지 못한다.
+
+유사 문자 치환은 **기본 정규화에 넣지 않는다.** `1 → ㅣ`, `0 → ㅇ` 를 항상 적용하면
+`아이폰 15` 가 `아이폰ㅣ5` 가 되어 정상 상품명이 망가진다. 그래서 두 가지 표현을
+만들어 두고 어느 쪽에서든 걸리면 매칭으로 보되, 유사 문자 쪽에서만 걸린 것은
+`evasion` 으로 표시해 차단하지 않고 AI 로 넘긴다.
+
+초성 추정(`ㄷㅂ` → 담배)은 하지 않는다. 담배인지 도배인지 알 수 없어 오탐이 급증한다.
+
+## 왜 LLM 인가
+
+분류 모델을 파인튜닝하지 않는 이유는 **학습 데이터가 0건**이기 때문이다. 그리고 이런
+문장은 애초에 단어 목록이나 임베딩 유사도로 잡히지 않는다.
+
+```
+"행복한 연기 팝니다"
+```
+
+금칙어가 하나도 없다. 문장의 뜻을 이해해야 한다.
+
+LLM 만이 **왜 막았는지 한국어로 설명**한다는 점도 크다. 그 문장이 그대로 사용자 안내
+문구가 되고, 관리자 검토 근거가 되고, 이의제기 대응 자료가 된다. 분류 모델은 확률값만
+뱉는다.
+
+## 모델 교체
+
+파이프라인은 `ModerationLLM` 프로토콜만 알고 어느 모델인지는 모른다. 프롬프트와 응답
+스키마가 공용이라 환경변수로 갈아끼운다.
+
+```bash
+MODERATION_PROVIDER=gemini            # gemini | openai | anthropic
+MODERATION_MODEL=gemini-3.5-flash     # 화면 표기가 아니라 API 용 모델 ID
+GEMINI_BASE_URL=https://.../v1beta
+GEMINI_API_KEY=...
+```
+
+설정은 `.env` 에 넣는다. `.env.example` 을 복사해 값만 채우면 된다.
+
+### 제공자는 벤더가 아니라 **API 형식**을 고르는 것이다
+
+사내 게이트웨이(SSAFY GMS)는 원래 벤더 주소를 그대로 뒤에 붙이는 방식이다.
+
+```
+https://gms.ssafy.io/gmsapi/generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent
+                     └────────────── 구글 원래 주소를 그대로 ──────────────┘
+```
+
+그래서 **모든 모델을 한 형식으로 부를 수 없다.** 부르려는 모델의 벤더에 맞춰 골라야 한다.
+
+| 제공자 | 호출 형태 | 어댑터 |
+| --- | --- | --- |
+| `gemini` | `{base}/models/{모델}:generateContent` | `GeminiModerationLLM` — httpx 직접 호출 |
+| `openai` | `{base}/chat/completions` | `OpenAIModerationLLM` — openai SDK |
+| `anthropic` | `{base}/v1/messages` | `AnthropicModerationLLM` — anthropic SDK |
+
+세 어댑터가 **같은 프롬프트와 같은 판정 계약**을 쓴다. 파이프라인은 어느 쪽인지 모른다.
+벤더별 차이는 어댑터 안에만 있다.
+
+| | Anthropic | OpenAI | Gemini |
+| --- | --- | --- | --- |
+| 구조화 출력 | `output_config.format` | `response_format.json_schema` | `generationConfig.responseSchema` |
+| 이미지 블록 | `source.base64` | `image_url` (data URI) | `inline_data` |
+| 프롬프트 캐싱 | `cache_control` 로 지점 지정 | 1,024 토큰 초과 시 자동 | 없음 |
+| 이미지 토큰 | (가로 × 세로) / 750 | `detail: low` 로 85 토큰 고정 | 258 토큰 고정 |
+
+이미지는 512px 로 줄여 보낸다. 담배갑·술병·약통 식별에는 충분하고 입력이 절반 이하로
+줄어든다.
+
+### 스키마 방언
+
+Gemini 는 OpenAPI 스키마의 부분집합만 받는다. `additionalProperties` 를 모르고,
+nullable 을 `["string", "null"]` 이 아니라 `nullable: true` 로 쓴다. 그래서 같은 계약을
+`RESPONSE_SCHEMA` 와 `GEMINI_RESPONSE_SCHEMA` 로 두 번 적어 둔다 — 한쪽을 그대로 보내면
+400 이 난다.
+
+OpenAI 형식 쪽에는 `MODERATION_JSON_MODE` 가 있다. 게이트웨이가 `json_schema` 를 거절하면
+`object` 로 바꾼다.
+
+| `MODERATION_JSON_MODE` | 동작 |
+| --- | --- |
+| `schema` (기본) | `json_schema` + `strict`. 스키마를 벗어난 응답을 아예 생성하지 못한다 |
+| `object` | `json_object`. 스키마를 프롬프트로 지시하고 파싱은 우리가 검증한다 |
+
+`object` 모드에서는 응답에 코드 펜스나 앞뒤 설명이 섞여 나오므로 가장 바깥 중괄호 쌍만
+잘라 파싱한다. 판정 문자열도 `검토필요` 처럼 띄어쓰기가 달라질 수 있어 흡수한다 — 표기
+차이 하나로 검수 전체가 실패할 이유는 없다. 반대로 **모르는 판정값은 예외로 올린다.**
+정상으로 흘려보내면 미탐이 되기 때문이다.
+
+### 연결 점검
+
+```bash
+python scripts/check_moderation_llm.py
+```
+
+우회 표현·부정문·연상 물건 7개 사례를 실제로 호출해 판정·확신도·소요 시간을 출력한다.
+연결 확인과 프롬프트 품질 점검을 겸한다. 게이트웨이 오류는 상태코드만으로 원인을 알 수
+없어 응답 본문을 함께 보여준다.
+
+## 설계 원칙
+
+**오탐이 미탐보다 비싸다.** 정상 상품을 막으면 판매자가 이탈하지만, 금지 품목이 한 번
+통과해도 신고·사후 탐지로 잡는다. 그래서 `confidence` 가 낮으면 **금지와 정상 양쪽 다**
+검토 필요로 내린다. 금지만 내리면 미탐이 그대로 통과한다.
+
+| 판정 | 임계값 | 미만이면 |
+| --- | --- | --- |
+| 금지 | `confidence ≥ 0.85` | 검토 필요 |
+| 정상 | `confidence ≥ 0.70` | 검토 필요 |
+
+**AI 장애가 상품 등록을 막지 않는다.** 외부 API 는 언제든 죽는다. 실패하면 등록을
+거부하는 대신 검토 필요로 보류하고 관리자·재시도로 넘긴다. 이미지 한 장이 깨져도
+마찬가지로 건너뛰고 나머지로 판정한다.
+
+**같은 내용을 다시 검수하지 않는다.** 상품명·설명·이미지의 해시(`content_hash`)를
+저장해 두고, 가격만 바꾼 수정은 LLM 을 부르지 않는다.
+
+## 금칙어 사전
+
+`config/banned_keywords.yaml` — 9개 카테고리, 변형 전개 후 60개 패턴.
+
+```
+담배 · 주류 · 의약품 · 마약류 · 무기류 · 개인정보 · 위조품 · 동물 · 기타
+```
+
+운영 중 추가는 이 파일만 고친다. 코드 수정도 재배포도 필요 없다.
+
+## 알려진 특성
+
+- **실제 API 호출은 아직 검증하지 않았다.** 응답 파싱·거부 처리·재시도 경로는 가짜
+  클라이언트로만 확인했다. 키를 넣고 한 번 돌려봐야 한다.
+- 사전은 초기 60개 패턴이라 커버리지가 넓지 않다. 1차에서 놓친 것은 2차가 받는
+  구조이므로 치명적이지는 않지만, 그만큼 LLM 호출이 늘어난다.
+- 임계값 0.85 / 0.70 은 근거 없는 초기값이다. 관리자 판정 로그가 쌓이면 조정한다.
+
+## 앞으로
+
+| 시점 | 할 일 |
+| --- | --- |
+| API 키 투입 후 | `scripts/check_moderation_llm.py` 로 실호출 검증. 프롬프트·임계값 1차 조정 |
+| 백엔드 연동 시 | `product.status` 갱신과 관리자 검토 큐 연결 |
+| 관리자 판정 로그 축적 후 | 임계값 재설정. 오탐 사례를 프롬프트에 반영 |
