@@ -33,9 +33,12 @@ class KeywordHit:
 class KeywordFilter:
     """금칙어 사전을 Aho-Corasick 오토마타로 올려두고 재사용한다."""
 
-    def __init__(self, categories: Mapping[str, Iterable[str]]) -> None:
+    def __init__(
+        self, categories: Mapping[str, Iterable[str]], version: str = "unknown"
+    ) -> None:
         self._automaton = ahocorasick.Automaton()
         self._count = 0
+        self._version = version
         for category, words in categories.items():
             for word in words:
                 for key in set(variants(word)):
@@ -50,11 +53,16 @@ class KeywordFilter:
     def load(cls, path: str | Path | None = None) -> "KeywordFilter":
         p = Path(path) if path else DEFAULT_KEYWORDS_PATH
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        return cls(raw.get("categories", {}))
+        return cls(raw.get("categories", {}), raw.get("version", "unknown"))
 
     @property
     def size(self) -> int:
         return self._count
+
+    @property
+    def version(self) -> str:
+        """사전 버전. 과거 판정을 해석할 때 어떤 사전이었는지 알아야 한다."""
+        return self._version
 
     def _scan(self, text: str, field: str) -> list[KeywordHit]:
         if not text or not self._count:

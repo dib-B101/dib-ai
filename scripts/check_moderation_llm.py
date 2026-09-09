@@ -9,11 +9,11 @@
 
 사용법::
 
-    export OPENAI_API_KEY=...
-    export OPENAI_BASE_URL=https://.../v1      # 사내 게이트웨이면
-    export MODERATION_PROVIDER=openai
-    export MODERATION_MODEL=gemini-3.5-flash
+    cp .env.example .env      # 그리고 키·모델을 채운다
     python scripts/check_moderation_llm.py
+
+설정은 저장소 루트의 ``.env`` 에서 읽는다. 이 파일 안의 값을 고치지 말 것 —
+아래 CASES 는 점검용 표본이지 설정이 아니다.
 
 이미지는 넣지 않는다. 텍스트 판정이 먼저 되어야 이미지를 볼 의미가 있다.
 """
@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from envfile import load_env  # noqa: E402
 from moderation.keywords import KeywordFilter  # noqa: E402
 from moderation.llm import create_llm  # noqa: E402
 from moderation.pipeline import ModerationPipeline  # noqa: E402
@@ -54,6 +55,14 @@ MARK = {True: "O", False: "X"}
 
 
 def main() -> int:
+    # Windows 콘솔 기본 인코딩(cp949)은 일부 기호를 못 찍고 그대로 죽는다.
+    # 점검 스크립트가 인코딩 때문에 실패하면 안 되므로 출력만 UTF-8 로 돌린다.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+    loaded = load_env()
+    print(f"설정 파일   {loaded or '(.env 없음 — 환경변수를 직접 읽습니다)'}")
+
     provider = os.getenv("MODERATION_PROVIDER") or "(자동 선택)"
     model = os.getenv("MODERATION_MODEL") or "(벤더 기본값)"
     base_url = os.getenv("OPENAI_BASE_URL") or "(기본 엔드포인트)"
@@ -71,7 +80,10 @@ def main() -> int:
         return 1
 
     if llm is None:
-        print("API 키가 없습니다. OPENAI_API_KEY 또는 ANTHROPIC_API_KEY 를 넣으십시오.")
+        print("API 키가 없습니다.\n")
+        print("  1. cp .env.example .env")
+        print("  2. .env 를 열어 OPENAI_API_KEY 와 OPENAI_BASE_URL 을 채우십시오")
+        print("  3. 다시 실행하십시오")
         return 1
 
     pipeline = ModerationPipeline(KeywordFilter.load(), llm)

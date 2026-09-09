@@ -4,6 +4,7 @@ pyyaml>=6.0
 # API
 fastapi>=0.110
 uvicorn[standard]>=0.27
+python-dotenv>=1.0   # .env 로 키·모델 설정
 
 # 테스트
 pytest>=8.0

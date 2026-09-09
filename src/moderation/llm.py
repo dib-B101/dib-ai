@@ -121,8 +121,31 @@ class ModerationLLM(Protocol):
 
 # ------------------------------------------------------------------ 입력 구성
 
+IMAGE_FETCH_TIMEOUT = 5.0
+
+
+def _read_bytes(path: str | Path) -> bytes | None:
+    """로컬 경로든 URL 이든 원본 바이트를 가져온다.
+
+    백엔드는 S3 URL 을 보내고 테스트는 로컬 파일을 쓴다. 둘 다 받는다.
+    """
+    text = str(path)
+    if text.startswith(("http://", "https://")):
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(text, timeout=IMAGE_FETCH_TIMEOUT) as resp:
+                return resp.read()
+        except Exception:
+            log.warning("이미지 다운로드 실패: %s", text)
+            return None
+
+    p = Path(text)
+    return p.read_bytes() if p.exists() else None
+
+
 def encode_image(path: str | Path) -> str | None:
-    """로컬 이미지를 512px JPEG base64 로 만든다. 실패하면 None 이다.
+    """이미지를 512px JPEG base64 로 만든다. 실패하면 None 이다.
 
     이미지 한 장이 깨져도 예외를 던지지 않고 건너뛴다. 나머지 이미지와 텍스트로
     판정한다 — 사진 하나 때문에 상품 등록이 막히는 편이 더 나쁘다.
@@ -133,21 +156,21 @@ def encode_image(path: str | Path) -> str | None:
         log.warning("Pillow 가 없어 이미지를 건너뜁니다")
         return None
 
-    p = Path(path)
-    if not p.exists():
+    raw = _read_bytes(path)
+    if raw is None:
         return None
 
     try:
         import io
 
-        with Image.open(p) as im:
+        with Image.open(io.BytesIO(raw)) as im:
             im = im.convert("RGB")
             im.thumbnail((MAX_IMAGE_EDGE, MAX_IMAGE_EDGE))
             buf = io.BytesIO()
             im.save(buf, format="JPEG", quality=85)
             data = buf.getvalue()
     except Exception:
-        log.warning("이미지 인코딩 실패: %s", p)
+        log.warning("이미지 인코딩 실패: %s", path)
         return None
 
     return base64.b64encode(data).decode()

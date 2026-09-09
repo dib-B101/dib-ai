@@ -15,6 +15,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 이상거래 탐지 — ML 트랙 | 부트스트랩 학습 완료, 서빙 미연결 | `src/fraud_ml/` |
 | 상품 검수 — 1차 규칙 필터 | 구현 완료 | `src/moderation/` |
 | 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
+| 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
 | 개인화 추천 | 미착수 (라이브 전환에 따라 재설계 필요) | TBD |
 
 ## 폴더 구조
@@ -32,6 +33,8 @@ dib-ai/
 │   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
 │   │   ├── rules.py          규칙 5종
 │   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
+│   ├── serve.py              두 API 를 한 서버에 띄우는 진입점
+│   ├── envfile.py            .env 로더
 │   ├── fraud_api/            HTTP 계층
 │   │   ├── main.py           FastAPI 앱 · 엔드포인트
 │   │   ├── models.py         요청·응답 스키마. 백엔드와의 계약
@@ -40,18 +43,22 @@ dib-ai/
 │   ├── fraud_ml/             ML 트랙 (부트스트랩)
 │   │   ├── bootstrap.py      학습 · 확률 보정 · 절제 실험
 │   │   └── explain.py        SHAP 기여도 → 한국어 탐지 사유
-│   └── moderation/           상품 검수
-│       ├── schema.py         입출력 자료구조. DB 도 HTTP 도 모른다
-│       ├── normalize.py      한글 우회 표현 정규화
-│       ├── keywords.py       Aho-Corasick 금칙어 필터
-│       ├── llm.py            2차 AI 검수. Claude / GPT 교체 가능
-│       └── pipeline.py       1차 → 2차 오케스트레이션
+│   ├── moderation/           상품 검수 (라이브러리)
+│   │   ├── schema.py         입출력 자료구조. DB 도 HTTP 도 모른다
+│   │   ├── normalize.py      한글 우회 표현 정규화
+│   │   ├── keywords.py       Aho-Corasick 금칙어 필터
+│   │   ├── llm.py            2차 AI 검수. 벤더 교체 가능
+│   │   └── pipeline.py       1차 → 2차 오케스트레이션
+│   └── moderation_api/       HTTP 계층
+│       ├── main.py           엔드포인트
+│       └── models.py         요청·응답 스키마. 백엔드와의 계약
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
 │   ├── test_engine.py        티켓 완료 조건 검증
-│   ├── test_api.py           API 계약 검증
-│   └── test_moderation.py    검수 파이프라인 검증
+│   ├── test_api.py           탐지 API 계약 검증
+│   ├── test_moderation.py    검수 파이프라인 검증
+│   └── test_moderation_api.py  검수 API 계약 검증
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
 │   ├── train_bootstrap_model.py   ML 부트스트랩 학습
@@ -60,6 +67,7 @@ dib-ai/
 │   └── shill_bidding_eda.ipynb   eBay 데이터셋 EDA
 ├── data/
 │   └── Shill Bidding Dataset.csv
+├── .env.example              키·모델 설정 서식. 복사해서 .env 로 쓴다
 ├── pytest.ini
 └── requirements.txt
 ```
@@ -72,14 +80,35 @@ dib-ai/
 python -m venv .venv && .venv/Scripts/activate   # Windows
 pip install -r requirements.txt
 
-python -m pytest                        # 테스트 84개
+cp .env.example .env                    # 그리고 API 키를 채운다
+
+python -m pytest                        # 테스트 93개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
-# API 서버
-PYTHONPATH=src uvicorn fraud_api.main:app --reload --port 8000
+# API 서버 — 탐지와 검수를 함께 띄운다
+PYTHONPATH=src uvicorn serve:app --reload --port 8000
 #   http://localhost:8000/docs   ← 백엔드는 여기를 보고 연동한다
 ```
+
+### 설정은 `.env` 로 한다
+
+키를 코드에 적지 않기 위해서다. `.env.example` 을 복사해 값만 채우면 된다.
+
+```bash
+cp .env.example .env
+```
+
+`.env` 는 `.gitignore` 에 있어 커밋되지 않는다. 이미 설정된 환경변수를 덮어쓰지
+않으므로, 배포 환경에서는 컨테이너가 넣은 값이 그대로 이긴다.
+
+### 왜 서버가 하나인가
+
+백엔드 입장에서 AI 는 서비스 하나다. 포트를 두 개 열면 서비스 등록도 헬스체크도
+두 벌이 된다. 그래서 배포는 `serve:app` 하나로 하고, `/docs` 에 두 API 가 함께 나온다.
+
+개별 앱(`fraud_api.main:app`, `moderation_api.main:app`)도 그대로 살아 있어 한쪽만
+띄워 시험할 수 있다.
 
 ---
 
@@ -480,6 +509,34 @@ python scripts/check_moderation_llm.py
 이미지는 512px 로 줄여 보낸다. 담배갑·술병·약통 식별에는 충분하고 입력이 절반 이하로
 줄어든다.
 
+## API
+
+```
+POST /internal/moderation/review   상품 1건 검수
+GET  /moderation/health            헬스체크
+```
+
+상품 등록·수정 시 호출한다. **판정만 하고 상태를 바꾸지 않는다** — 자동 차단 여부는
+백엔드 정책이다.
+
+응답에 `product_status` 를 함께 담는다. 백엔드가 "검토 필요가 어느 상태였더라" 를
+매번 찾아보지 않게 하려는 것이다.
+
+| `verdict` | `product_status` |
+| --- | --- |
+| 정상 | `REGISTERED` |
+| 검토 필요 | `PENDING` |
+| 금지 | `REJECTED` |
+
+`stage` 가 어디서 결정되었는지 알려준다 — `rule` 은 1차 필터가 AI 없이 끝낸 것,
+`ai` 는 2차 판정, `fallback` 은 AI 호출이 실패해 보류된 것이다.
+
+**검수 실패로 500 을 내지 않는다.** AI 가 죽어도 200 으로 `검토 필요`를 돌려준다.
+검수 장애가 상품 등록을 막아서는 안 된다.
+
+이미지는 http(s) URL 과 로컬 경로를 모두 받는다. 내려받지 못한 이미지는 조용히
+건너뛰고 나머지로 판정한다.
+
 ## 설계 원칙
 
 **오탐이 미탐보다 비싸다.** 정상 상품을 막으면 판매자가 이탈하지만, 금지 품목이 한 번
@@ -521,5 +578,5 @@ python scripts/check_moderation_llm.py
 | 시점 | 할 일 |
 | --- | --- |
 | API 키 투입 후 | `scripts/check_moderation_llm.py` 로 실호출 검증. 프롬프트·임계값 1차 조정 |
-| `POST /internal/moderation/review` | HTTP 계층 추가. 백엔드 연동 |
+| 백엔드 연동 시 | `product.status` 갱신과 관리자 검토 큐 연결 |
 | 관리자 판정 로그 축적 후 | 임계값 재설정. 오탐 사례를 프롬프트에 반영 |
