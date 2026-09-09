@@ -15,6 +15,7 @@ from moderation.llm import (
     build_content,
     build_openai_content,
     create_llm,
+    loads_lenient,
     parse_verdict,
 )
 from moderation.normalize import normalize, normalize_aggressive
@@ -279,3 +280,40 @@ def test_openai_refusal_raises_so_pipeline_holds(monkeypatch):
 
     with pytest.raises(RuntimeError, match="거부"):
         OpenAIModerationLLM(FakeClient()).judge(_product())
+
+
+def test_json_object_mode_puts_schema_in_prompt():
+    """스키마를 강제 못 하는 엔드포인트에서는 프롬프트로 형식을 지시해야 한다."""
+    strict = OpenAIModerationLLM(object(), json_mode="schema")
+    loose = OpenAIModerationLLM(object(), json_mode="object")
+
+    assert strict._response_format()["type"] == "json_schema"
+    assert loose._response_format() == {"type": "json_object"}
+    assert "출력 형식" in loose._system_prompt()
+    assert "출력 형식" not in strict._system_prompt()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"verdict":"정상","category":null,"confidence":0.9,"reason":"ok"}',
+        '```json\n{"verdict":"정상","category":null,"confidence":0.9,"reason":"ok"}\n```',
+        '판정 결과입니다.\n{"verdict":"정상","category":null,"confidence":0.9,"reason":"ok"}',
+    ],
+)
+def test_loads_lenient_survives_fences_and_prose(raw):
+    """스키마 강제가 없으면 펜스나 앞뒤 설명이 섞여 나온다."""
+    assert loads_lenient(raw)["verdict"] == "정상"
+
+
+def test_verdict_alias_absorbs_spacing():
+    """'검토필요' 하나 때문에 검수 전체가 실패할 이유는 없다."""
+    data = {"verdict": "검토필요", "category": None, "confidence": 0.5, "reason": ""}
+    assert parse_verdict(data, "m").verdict is Verdict.NEEDS_REVIEW
+
+
+def test_unknown_verdict_raises_so_pipeline_holds():
+    """모르는 판정값을 정상으로 흘려보내면 미탐이 된다. 보류로 가야 한다."""
+    data = {"verdict": "허용", "category": None, "confidence": 0.9, "reason": ""}
+    with pytest.raises(ValueError, match="알 수 없는 판정값"):
+        parse_verdict(data, "m")

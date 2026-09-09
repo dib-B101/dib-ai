@@ -91,6 +91,18 @@ RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# 스키마를 강제할 수 없는 엔드포인트에서 형식을 지시하는 문구.
+SCHEMA_INSTRUCTION = """
+## 출력 형식
+
+다른 말 없이 아래 JSON 객체만 출력하십시오.
+
+{"verdict": "정상" | "검토 필요" | "금지",
+ "category": 제한 품목 분류 문자열 또는 null,
+ "confidence": 0 이상 1 이하의 숫자,
+ "reason": "사용자에게 보여줄 한 문장"}
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class LLMVerdict:
@@ -196,15 +208,46 @@ def build_openai_content(product: ProductInput, hint: str | None = None) -> list
     return blocks
 
 
+_VERDICT_ALIASES = {
+    "정상": Verdict.NORMAL,
+    "검토 필요": Verdict.NEEDS_REVIEW,
+    "검토필요": Verdict.NEEDS_REVIEW,
+    "금지": Verdict.BLOCKED,
+}
+
+
+def loads_lenient(text: str) -> dict:
+    """모델 응답에서 JSON 객체를 꺼낸다.
+
+    스키마를 강제하지 못하는 엔드포인트에서는 ```json 펜스나 앞뒤 설명이 섞여 나온다.
+    가장 바깥 중괄호 쌍만 잘라서 파싱한다.
+    """
+    text = (text or "").strip()
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
 def parse_verdict(data: dict, model_version: str) -> LLMVerdict:
     """벤더 응답 JSON 을 공용 값 객체로 옮긴다.
 
-    confidence 를 0~1 로 자른다. 스키마에 범위를 적어도 모델이 100 같은 값을
-    보내는 경우가 있고, 그대로 두면 임계값 판정이 무력화된다.
+    두 가지를 방어한다. **confidence 를 0~1 로 자른다** — 스키마에 범위를 적어도
+    모델이 100 을 보내는 경우가 있고, 그대로 두면 임계값 판정이 무력화된다.
+    그리고 **판정 문자열의 사소한 표기 차이를 흡수한다** — "검토필요" 로 붙여 쓴
+    응답 하나 때문에 검수 전체가 실패할 이유는 없다.
     """
+    raw = str(data.get("verdict", "")).strip()
+    verdict = _VERDICT_ALIASES.get(raw)
+    if verdict is None:
+        raise ValueError(f"알 수 없는 판정값: {raw!r}")
+
     confidence = float(data.get("confidence", 0.0))
     return LLMVerdict(
-        verdict=Verdict(data["verdict"]),
+        verdict=verdict,
         category=data.get("category"),
         confidence=min(max(confidence, 0.0), 1.0),
         reason=data.get("reason", ""),
@@ -251,45 +294,71 @@ class AnthropicModerationLLM:
         text = "".join(
             b.text for b in response.content if getattr(b, "type", "") == "text"
         )
-        return parse_verdict(json.loads(text), getattr(response, "model", self._model))
+        return parse_verdict(loads_lenient(text), getattr(response, "model", self._model))
 
 
 class OpenAIModerationLLM:
-    """GPT 호출.
+    """OpenAI 형식 Chat Completions 호출.
 
-    Anthropic 과 달리 캐시 지점을 직접 지정하지 않는다. 1,024 토큰이 넘는 프롬프트의
-    공통 접두사를 자동으로 캐싱하므로 시스템 프롬프트를 맨 앞에 두는 것으로 족하다.
-    (우리 프롬프트는 그 문턱보다 짧아 실제로는 캐시가 안 걸릴 수 있다.)
+    OpenAI 본사뿐 아니라 **OpenAI 호환 게이트웨이**도 여기로 붙는다. ``base_url`` 만
+    바꾸면 같은 엔드포인트로 GPT·Gemini·Claude 를 모두 부를 수 있다. 사내 게이트웨이는
+    보통 이 형태라 벤더별 클라이언트를 따로 만들 필요가 없다.
 
-    ``strict: true`` 는 스키마를 벗어난 응답을 아예 생성하지 못하게 막는다. 파싱
-    실패를 걱정하지 않아도 되는 대신, 모든 필드가 ``required`` 이고
-    ``additionalProperties: false`` 여야 한다는 제약이 붙는다.
+        OPENAI_BASE_URL=https://.../v1
+        MODERATION_MODEL=gemini-3.5-flash
+
+    구조화 출력은 두 방식을 지원한다. 게이트웨이가 OpenAI 를 그대로 중계하지 않는
+    경우가 많아서다 — Gemini·Claude 를 OpenAI 형식으로 감싼 엔드포인트는 ``json_schema``
+    를 거절하고 ``json_object`` 만 받는 일이 흔하다.
+
+        schema   json_schema + strict. 스키마를 벗어난 응답을 아예 생성하지 못한다
+        object   json_object. 스키마를 프롬프트로 지시하고 파싱은 우리가 검증한다
+
+    어느 쪽이 되는지는 ``scripts/check_moderation_llm.py`` 로 한 번 확인하면 된다.
     """
 
     name = "openai"
 
-    def __init__(self, client=None, model: str = OPENAI_MODEL) -> None:
+    def __init__(
+        self,
+        client=None,
+        model: str = OPENAI_MODEL,
+        json_mode: str = "schema",
+        base_url: str | None = None,
+    ) -> None:
         if client is None:
             import openai
 
-            client = openai.OpenAI()
+            client = openai.OpenAI(base_url=base_url or os.getenv("OPENAI_BASE_URL"))
         self._client = client
         self._model = model
+        self._json_mode = json_mode
+
+    def _response_format(self) -> dict:
+        if self._json_mode == "object":
+            return {"type": "json_object"}
+        return {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "moderation_verdict",
+                "strict": True,
+                "schema": RESPONSE_SCHEMA,
+            },
+        }
+
+    def _system_prompt(self) -> str:
+        # json_object 모드에는 스키마 강제가 없으므로 프롬프트로 형식을 지시한다.
+        if self._json_mode == "object":
+            return SYSTEM_PROMPT + SCHEMA_INSTRUCTION
+        return SYSTEM_PROMPT
 
     def judge(self, product: ProductInput, hint: str | None = None) -> LLMVerdict:
         response = self._client.chat.completions.create(
             model=self._model,
             max_tokens=1024,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "moderation_verdict",
-                    "strict": True,
-                    "schema": RESPONSE_SCHEMA,
-                },
-            },
+            response_format=self._response_format(),
             messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "system", "content": self._system_prompt()},
                 {"role": "user", "content": build_openai_content(product, hint)},
             ],
         )
@@ -299,7 +368,7 @@ class OpenAIModerationLLM:
         if getattr(message, "refusal", None):
             raise RuntimeError(f"모델이 응답을 거부했습니다: {message.refusal}")
         return parse_verdict(
-            json.loads(message.content), getattr(response, "model", self._model)
+            loads_lenient(message.content), getattr(response, "model", self._model)
         )
 
 
@@ -317,7 +386,12 @@ def create_llm(
     """환경변수로 검수 모델을 고른다.
 
         MODERATION_PROVIDER=openai      생략하면 키가 있는 쪽을 자동 선택
-        MODERATION_MODEL=gpt-4o         생략하면 벤더 기본값
+        MODERATION_MODEL=gemini-3.5-flash   생략하면 벤더 기본값
+        MODERATION_JSON_MODE=schema     schema | object (openai 계열만)
+        OPENAI_BASE_URL=https://.../v1  사내 게이트웨이를 쓸 때
+
+    OpenAI 호환 게이트웨이는 ``openai`` 제공자에 ``OPENAI_BASE_URL`` 만 지정하면
+    된다. 그 뒤로는 모델 이름만 바꿔 GPT·Gemini·Claude 를 오간다.
 
     키가 하나도 없으면 None 을 돌려주고 파이프라인은 모든 상품을 "검토 필요"로
     보류한다. **키가 없다고 서버가 죽지는 않는다** — 1차 규칙 필터는 그대로
@@ -345,5 +419,9 @@ def create_llm(
         raise RuntimeError(f"{name} 를 쓰려면 {env_key} 환경변수가 필요합니다")
 
     chosen = model or os.getenv("MODERATION_MODEL") or default_model
+    kwargs: dict = {"model": chosen}
+    if name == "openai":
+        kwargs["json_mode"] = os.getenv("MODERATION_JSON_MODE", "schema").strip().lower()
+
     log.info("2차 AI 검수 준비 — provider=%s, model=%s", name, chosen)
-    return cls(model=chosen)
+    return cls(**kwargs)

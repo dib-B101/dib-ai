@@ -54,7 +54,8 @@ dib-ai/
 │   └── test_moderation.py    검수 파이프라인 검증
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
-│   └── train_bootstrap_model.py   ML 부트스트랩 학습
+│   ├── train_bootstrap_model.py   ML 부트스트랩 학습
+│   └── check_moderation_llm.py    검수 모델 실호출 점검
 ├── notebooks/
 │   └── shill_bidding_eda.ipynb   eBay 데이터셋 EDA
 ├── data/
@@ -71,7 +72,7 @@ dib-ai/
 python -m venv .venv && .venv/Scripts/activate   # Windows
 pip install -r requirements.txt
 
-python -m pytest                        # 테스트 78개
+python -m pytest                        # 테스트 84개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
@@ -429,10 +430,40 @@ LLM 만이 **왜 막았는지 한국어로 설명**한다는 점도 크다. 그 
 스키마가 공용이라 환경변수로 갈아끼운다.
 
 ```bash
-MODERATION_PROVIDER=openai      # anthropic | openai. 생략하면 키 있는 쪽 자동 선택
-MODERATION_MODEL=gpt-4o         # 생략하면 벤더 기본값
-OPENAI_API_KEY=sk-...           # 또는 ANTHROPIC_API_KEY
+MODERATION_PROVIDER=openai            # anthropic | openai. 생략하면 키 있는 쪽 자동 선택
+MODERATION_MODEL=gemini-3.5-flash     # 생략하면 벤더 기본값
+MODERATION_JSON_MODE=schema           # schema | object
+OPENAI_API_KEY=...                    # 또는 ANTHROPIC_API_KEY
+OPENAI_BASE_URL=https://.../v1        # 사내 게이트웨이를 쓸 때만
 ```
+
+### OpenAI 호환 게이트웨이
+
+`OPENAI_BASE_URL` 만 지정하면 **하나의 엔드포인트로 GPT·Gemini·Claude 를 모두** 부른다.
+벤더별 클라이언트를 따로 만들 필요가 없고, 모델 교체는 `MODERATION_MODEL` 한 줄이다.
+
+다만 게이트웨이가 OpenAI 를 그대로 중계하지 않는 경우가 많다. Gemini·Claude 를 OpenAI
+형식으로 감싼 엔드포인트는 `json_schema` 를 거절하고 `json_object` 만 받는 일이 흔하다.
+그래서 두 방식을 지원한다.
+
+| `MODERATION_JSON_MODE` | 동작 |
+| --- | --- |
+| `schema` (기본) | `json_schema` + `strict`. 스키마를 벗어난 응답을 아예 생성하지 못한다 |
+| `object` | `json_object`. 스키마를 프롬프트로 지시하고 파싱은 우리가 검증한다 |
+
+`object` 모드에서는 응답에 ```` ```json ```` 펜스나 앞뒤 설명이 섞여 나오므로, 가장 바깥
+중괄호 쌍만 잘라 파싱한다. 판정 문자열도 `검토필요` 처럼 띄어쓰기가 달라질 수 있어
+흡수한다 — 표기 차이 하나로 검수 전체가 실패할 이유는 없다. 반대로 **모르는 판정값은
+예외로 올린다.** 정상으로 흘려보내면 미탐이 되기 때문이다.
+
+어느 모드가 되는지는 한 번 확인하면 된다.
+
+```bash
+python scripts/check_moderation_llm.py
+```
+
+우회 표현·부정문·연상 물건 7개 사례를 실제로 호출해 판정·확신도·소요 시간을 출력한다.
+연결 확인과 프롬프트 품질 점검을 겸한다.
 
 **키가 없어도 서버는 뜬다.** 1차 규칙 필터는 그대로 동작하므로 명백한 위반은 계속
 걸러지고, 나머지는 전부 "검토 필요"로 보류된다.
@@ -489,6 +520,6 @@ OPENAI_API_KEY=sk-...           # 또는 ANTHROPIC_API_KEY
 
 | 시점 | 할 일 |
 | --- | --- |
-| API 키 투입 후 | 실호출 검증. 프롬프트·임계값 1차 조정 |
+| API 키 투입 후 | `scripts/check_moderation_llm.py` 로 실호출 검증. 프롬프트·임계값 1차 조정 |
 | `POST /internal/moderation/review` | HTTP 계층 추가. 백엔드 연동 |
 | 관리자 판정 로그 축적 후 | 임계값 재설정. 오탐 사례를 프롬프트에 반영 |
