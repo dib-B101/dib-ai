@@ -63,28 +63,33 @@ def main() -> int:
     loaded = load_env()
     print(f"설정 파일   {loaded or '(.env 없음 — 환경변수를 직접 읽습니다)'}")
 
-    provider = os.getenv("MODERATION_PROVIDER") or "(자동 선택)"
-    model = os.getenv("MODERATION_MODEL") or "(벤더 기본값)"
-    base_url = os.getenv("OPENAI_BASE_URL") or "(기본 엔드포인트)"
-    json_mode = os.getenv("MODERATION_JSON_MODE", "schema")
-
-    print(f"provider   {provider}")
-    print(f"model      {model}")
-    print(f"base_url   {base_url}")
-    print(f"json_mode  {json_mode}\n")
+    provider = (os.getenv("MODERATION_PROVIDER") or "").strip().lower()
+    print(f"provider   {provider or '(자동 선택)'}")
+    print(f"model      {os.getenv('MODERATION_MODEL') or '(벤더 기본값)'}")
 
     try:
         llm = create_llm()
     except Exception as exc:
-        print(f"모델을 만들지 못했습니다 — {type(exc).__name__}: {exc}")
+        print(f"\n모델을 만들지 못했습니다 — {type(exc).__name__}: {exc}")
         return 1
 
     if llm is None:
-        print("API 키가 없습니다.\n")
+        print("\nAPI 키가 없습니다.\n")
         print("  1. cp .env.example .env")
-        print("  2. .env 를 열어 OPENAI_API_KEY 와 OPENAI_BASE_URL 을 채우십시오")
+        print("  2. .env 를 열어 제공자에 맞는 키와 주소를 채우십시오")
         print("  3. 다시 실행하십시오")
         return 1
+
+    # 제공자마다 읽는 환경변수가 다르다. 만들어진 객체에서 직접 꺼내야
+    # "설정한 값이 실제로 쓰였는지" 를 확인할 수 있다.
+    if endpoint := getattr(llm, "url", None):
+        print(f"endpoint   {endpoint}")
+    else:
+        base = getattr(getattr(llm, "_client", None), "base_url", None)
+        print(f"endpoint   {base or '(벤더 기본 엔드포인트)'}")
+    if getattr(llm, "name", None) == "openai":
+        print(f"json_mode  {os.getenv('MODERATION_JSON_MODE', 'schema')}")
+    print()
 
     pipeline = ModerationPipeline(KeywordFilter.load(), llm)
 
