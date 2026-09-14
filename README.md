@@ -16,7 +16,8 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 상품 검수 — 1차 규칙 필터 | 구현 완료 | `src/moderation/` |
 | 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
 | 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
-| 개인화 추천 | 미착수 (라이브 전환에 따라 재설계 필요) | TBD |
+| 추천 — 인기순 (STEP 1) | 구현 완료 | `src/reco/`, `src/reco_api/` |
+| 추천 — 임베딩·개인화 (STEP 2~) | 미착수 (스키마 대기) | TBD |
 
 ## 폴더 구조
 
@@ -24,7 +25,8 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 dib-ai/
 ├── config/
 │   ├── rules.yaml            임계값·가중치. 코드 수정 없이 조정한다
-│   └── banned_keywords.yaml  금칙어 사전. 운영 중 추가는 여기만 고친다
+│   ├── banned_keywords.yaml  금칙어 사전. 운영 중 추가는 여기만 고친다
+│   └── reco.yaml             추천 랭킹 가중치
 ├── src/
 │   ├── fraud/                규칙 엔진 (라이브러리)
 │   │   ├── __init__.py       공개 API (RuleConfig, detect, combine)
@@ -49,9 +51,18 @@ dib-ai/
 │   │   ├── keywords.py       Aho-Corasick 금칙어 필터
 │   │   ├── llm.py            2차 AI 검수. 벤더 교체 가능
 │   │   └── pipeline.py       1차 → 2차 오케스트레이션
-│   └── moderation_api/       HTTP 계층
+│   ├── moderation_api/       HTTP 계층
+│   │   ├── main.py           엔드포인트
+│   │   └── models.py         요청·응답 스키마. 백엔드와의 계약
+│   ├── reco/                 추천 (라이브러리)
+│   │   ├── schema.py         입출력 자료구조. DB 를 모른다
+│   │   ├── config.py         YAML 로더 + 가중치 검증
+│   │   └── popularity.py     인기순 랭킹. 개인화는 boost 훅으로 끼운다
+│   └── reco_api/             HTTP 계층
 │       ├── main.py           엔드포인트
-│       └── models.py         요청·응답 스키마. 백엔드와의 계약
+│       ├── models.py         요청·응답 스키마
+│       ├── provider.py       후보 조회기
+│       └── demo.py           합성 후보
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
@@ -59,6 +70,8 @@ dib-ai/
 │   ├── test_api.py           탐지 API 계약 검증
 │   ├── test_moderation.py    검수 파이프라인 검증
 │   ├── test_moderation_api.py  검수 API 계약 검증
+│   ├── test_reco.py          랭킹 검증
+│   ├── test_reco_api.py      추천 API 계약 검증
 │   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
@@ -83,11 +96,11 @@ pip install -r requirements.txt
 
 cp .env.example .env                    # 그리고 API 키를 채운다
 
-python -m pytest                        # 테스트 100개
+python -m pytest                        # 테스트 131개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
-# API 서버 — 탐지와 검수를 함께 띄운다
+# API 서버 — 탐지 · 검수 · 추천을 함께 띄운다
 PYTHONPATH=src uvicorn serve:app --reload --port 8000
 #   http://localhost:8000/docs   ← 백엔드는 여기를 보고 연동한다
 ```
@@ -571,3 +584,87 @@ python scripts/check_moderation_llm.py
 | API 키 투입 후 | `scripts/check_moderation_llm.py` 로 실호출 검증. 프롬프트·임계값 1차 조정 |
 | 백엔드 연동 시 | `product.status` 갱신과 관리자 검토 큐 연결 |
 | 관리자 판정 로그 축적 후 | 임계값 재설정. 오탐 사례를 프롬프트에 반영 |
+
+---
+
+# 추천 (STEP 1 — 인기순)
+
+```
+GET /internal/reco/home?member_id=&limit=20   홈 리스트 노출 순서
+GET /reco/health                              헬스체크
+```
+
+**개인화가 없다.** 마감 임박도·인기도·경쟁도만으로 순서를 만든다.
+
+## 왜 이것부터 만드나
+
+난이도는 가장 낮은데 **세 곳에서 재사용**된다.
+
+| 쓰이는 곳 | 상황 |
+| --- | --- |
+| Cold Start 폴백 | 행동 이력이 없는 신규 사용자 |
+| 성능 평가 baseline | 개인화가 이것보다 나은지 증명해야 한다 |
+| 장애 폴백 | 임베딩·벡터 검색이 죽어도 추천은 나가야 한다 |
+
+개인화가 붙어도 **엔드포인트 계약은 바뀌지 않는다.** 응답의 `strategy` 값만 달라진다.
+`member_id` 파라미터도 지금은 무시하지만 미리 받아 둔다 — 백엔드 연동을 두 번 하지 않기 위해서다.
+
+## 점수
+
+```
+score = 0.4 × urgency
+      + 0.3 × pct(조회수 0.4, 찜수 0.6)
+      + 0.3 × pct(입찰수 0.4, 입찰자수 0.6)
+
+urgency = exp(−남은시간 / 3600)
+```
+
+가중치는 `config/reco.yaml` 에서 바꾼다. 합이 1 이 아니면 서버가 뜰 때 죽는다 —
+오타 하나로 순서가 조용히 망가지면 원인을 찾는 데 훨씬 오래 걸린다.
+
+### 백분위로 정규화하는 이유
+
+유사도는 0~1 인데 조회수는 수만, 입찰수는 수백이다. **원값을 그대로 더하면 스케일이 큰
+항이 가중치와 무관하게 순위를 지배한다.** 절대값이 아니라 **지금 후보들 사이에서 몇
+등인지**를 쓴다.
+
+서비스 초기처럼 모든 값이 0 이면 전원 같은 백분위가 되어 이 항이 순위에 영향을 주지
+않는다. 정보가 없을 때 억지로 순서를 만들지 않는다.
+
+### 마감 임박도를 지수로 두는 이유
+
+남은 시간의 **역수**로 정의하면 1초 남은 경매가 무한대가 되어 다른 항을 전부 눌러버린다.
+지수는 0 에 가까워져도 1 로 수렴한다.
+
+### 종료된 경매를 반드시 걸러야 하는 이유
+
+남은 시간이 0 이하면 마감 임박도가 **최대**가 된다. 걸러내지 않으면 **끝난 경매가 목록
+맨 위에 올라온다.** 제외된 건수는 응답의 `excluded` 에 담긴다.
+
+## 개인화가 들어갈 자리
+
+```python
+rank(candidates, cfg, now, boost=lambda c: 0.5 * similarity(profile, c))
+```
+
+`rank()` 에 `boost` 훅을 뚫어 두었다. STEP 5 에서 유사도를 여기에 끼우면 **랭킹 코드를
+다시 쓰지 않는다.**
+
+## 실행
+
+```bash
+PYTHONPATH=src uvicorn serve:app --reload --port 8000
+#   http://localhost:8000/docs
+```
+
+데모 후보 5건이 들어 있다. 인기 최상위지만 이미 종료된 경매가 하나 섞여 있어,
+`excluded` 동작을 바로 확인할 수 있다.
+
+## 알려진 특성
+
+- **DB 미연결.** `PostgresProvider` 는 쿼리만 주석으로 적혀 있고 예외를 던진다.
+  `auction JOIN product` 로 판매자를 가져와야 한다 — `auction` 에는 판매자가 없다
+- 가중치 0.4 / 0.3 / 0.3 은 근거 없는 초기값이다. 설계상 **마감 임박만으로는 인기·경쟁
+  최상위를 이길 수 없다**(0.4 < 0.6). 이 균형을 바꾸려면 YAML 을 고친다
+- 지표가 0 인 신규 상품은 마감이 다가와야 올라온다. 노출 기회를 더 주려면 별도의
+  신규 가점이 필요하다
