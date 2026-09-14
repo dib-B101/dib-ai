@@ -44,6 +44,17 @@ def _normalize(matrix):
     return (matrix / norms).astype("float32")
 
 
+def _as_tensor(features):
+    """``get_image_features`` 의 반환 형식을 흡수한다.
+
+    transformers 4.x 는 텐서를 그대로 주고, 5.x 는 출력 객체를 준다. 버전이 올라갔을 때
+    조용히 깨지지 않도록 둘 다 받는다. 이미지 한 장은 pooler_output 이 벡터다.
+    """
+    if hasattr(features, "pooler_output"):
+        return features.pooler_output
+    return features
+
+
 def build_text(title: str, description: str | None = None) -> str:
     """임베딩에 넣을 텍스트를 만든다.
 
@@ -125,11 +136,15 @@ class ImageEncoder:
             return
 
         import torch
-        from transformers import AutoModel, AutoProcessor
+        from transformers import AutoImageProcessor, AutoModel
 
         log.info("이미지 임베딩 모델 로드 — %s (%s)", self.model_name, self.device)
         model = AutoModel.from_pretrained(self.model_name).to(self.device).eval()
-        processor = AutoProcessor.from_pretrained(self.model_name)
+
+        # AutoProcessor 를 쓰면 텍스트 토크나이저까지 따라온다. SigLIP 토크나이저는
+        # SentencePiece 를 요구하는데, 우리는 이미지만 인코딩하므로 쓸 일이 없다.
+        # 이미지 전처리기만 불러 의존성을 하나 줄인다.
+        processor = AutoImageProcessor.from_pretrained(self.model_name)
 
         actual = model.config.vision_config.hidden_size
         if actual != self.dim:
@@ -157,8 +172,7 @@ class ImageEncoder:
             for i in range(0, len(images), batch_size):
                 chunk = list(images[i : i + batch_size])
                 inputs = self._processor(images=chunk, return_tensors="pt").to(self.device)
-                features = self._model.get_image_features(**inputs)
-                out.append(features.cpu().numpy())
+                out.append(_as_tensor(self._model.get_image_features(**inputs)).cpu().numpy())
 
         return _normalize(np.vstack(out))
 
