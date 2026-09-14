@@ -87,7 +87,9 @@ class TextEncoder:
         log.info("텍스트 임베딩 모델 로드 — %s (%s)", self.model_name, self.device)
         model = SentenceTransformer(self.model_name, device=self.device)
 
-        actual = model.get_sentence_embedding_dimension()
+        # 설정값을 믿지 않고 실제로 한 번 인코딩해 확인한다.
+        # 라이브러리 버전에 따라 메타데이터가 실제 출력과 어긋나는 경우가 있다.
+        actual = int(model.encode(["차원 확인"], convert_to_numpy=True).shape[1])
         if actual != self.dim:
             raise ValueError(
                 f"{self.model_name} 의 출력이 {actual}차원입니다. "
