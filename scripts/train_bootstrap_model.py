@@ -14,6 +14,7 @@ eBay 데이터에서 점수를 올리는 작업은 하지 않는다 — 피처 �
 from __future__ import annotations
 
 import json
+from statistics import mean, stdev
 import sys
 from pathlib import Path
 
@@ -27,7 +28,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from fraud_ml.bootstrap import (  # noqa: E402
     ADOPTED,
     LEAKED,
-    SUBSCRIPTION_CONFLICT,
+    OUT_OF_RANGE,
+    REDEFINED,
+    UNSPECIFIABLE,
     RANDOM_STATE,
     SERVING_FEATURES,
     TARGET,
@@ -39,6 +42,10 @@ from fraud_ml.explain import top_reasons  # noqa: E402
 
 CSV = ROOT / "data" / "Shill Bidding Dataset.csv"
 OUT = ROOT / "artifacts"
+
+
+# 피처 조합을 단일 시드로 판단하지 않기 위한 재측정용 시드.
+SEEDS = (42, 7, 123, 2024, 31337)
 
 
 def main() -> None:
@@ -82,21 +89,38 @@ def main() -> None:
     for f, v in report.importance.items():
         print(f"    {f:<24} {v * 100:5.1f}%  {'#' * int(v * 60)}")
 
-    # 구독 충돌 확인 --------------------------------------------------------
-    b = next(r for r in reports if r.name.startswith("B."))
-    c = next(r for r in reports if r.name.startswith("C."))
+    # 시드 분산 --------------------------------------------------------------
+    # 단일 시드 숫자로 피처를 고르면 안 된다. 분할이 달라지면 순위가 뒤집힌다.
     print("\n" + "=" * 96)
-    print("판매자 편중도(Bidder_Tendency) 를 왜 뺐는가")
+    print(f"시드 분산 — 채택 구성을 {len(SEEDS)}개 시드로 재측정")
     print("=" * 96)
-    print(f"  PR-AUC     {b.pr_auc:.4f} → {c.pr_auc:.4f}  "
-          f"({(c.pr_auc - b.pr_auc) / b.pr_auc * 100:+.1f}%)")
-    print(f"  Precision  {b.precision_at_best:.3f} → {c.precision_at_best:.3f}  "
-          f"({(c.precision_at_best - b.precision_at_best) / b.precision_at_best * 100:+.1f}%)")
-    print(f"  Recall     {b.recall_at_best:.3f} → {c.recall_at_best:.3f}")
+    pr, prec, rec = [], [], []
+    for seed in SEEDS:
+        r, _, _ = train_one(df, feats, report.name, seed=seed)
+        pr.append(r.pr_auc); prec.append(r.precision_at_best); rec.append(r.recall_at_best)
+
+    for label, values in [("PR-AUC", pr), ("Precision", prec), ("Recall", rec)]:
+        print(f"  {label:<10} {mean(values):.3f} +- {stdev(values):.3f}   "
+              f"[{min(values):.3f} ~ {max(values):.3f}]")
     print()
-    print("  라이브 구독 모델에서는 구독자가 좋아하는 방송자의 경매에만 참여하는 것이 정상이다.")
-    print("  eBay 모델은 '판매자 편중이 높으면 위험' 으로 배우므로 충성 고객이 고위험으로 찍힌다.")
-    print("  제외했더니 성능과 정밀도가 함께 올라, 트레이드오프가 아니라 순이득이었다.")
+    print("  표준편차가 조합 간 차이보다 크다. 성능만으로는 피처 조합의 우열을 가릴 수 없다.")
+    print("  그래서 '우리 데이터로 재현 가능한가' 를 기준으로 골랐다.")
+
+    # 피처 선택 근거 ----------------------------------------------------------
+    print("\n" + "=" * 96)
+    print("서빙 피처를 이렇게 고른 이유")
+    print("=" * 96)
+    print(f"  제외   {LEAKED:<24} 정책상 최고 입찰자의 연속 입찰이 불가능해 항상 0")
+    print(f"  제외   {OUT_OF_RANGE:<24} 라이브(분)와 일반 경매(판매자 자유)가 섞여")
+    print(f"  {'':8}{'':<24} '긴 경매인가' 가 아니라 '경매 유형' 을 가리키게 된다")
+    print(f"  제외   {UNSPECIFIABLE:<24} 원식·방향을 특정할 수 없다 (Class 상관 +0.043).")
+    print(f"  {'':8}{'':<24} 방향이 반대면 모델이 정반대로 읽는다")
+    print(f"  재정의 {REDEFINED:<24} 구독하지 않은 판매자에 대한 편중도로 바꿔 쓴다.")
+    print(f"  {'':8}{'':<24} eBay 에는 구독이 없어 학습은 원본 그대로 하고,")
+    print(f"  {'':8}{'':<24} 서빙에서만 구독 건을 빼면 '높으면 의심' 이 유지된다")
+    print()
+    print("  Auction_Bids 는 '입찰 수를 코퍼스 내 min-max 정규화' 로 식이 자명하다.")
+    print("  우리 코퍼스로 같은 변환을 하면 의미가 대응되므로 그대로 쓴다.")
 
     # SHAP 사유 예시 --------------------------------------------------------
     print("\n" + "=" * 96)
@@ -124,9 +148,21 @@ def main() -> None:
         "features": list(feats),
         "excluded_features": {
             LEAKED: "서비스 정책상 최고 입찰자의 연속 입찰이 불가능해 항상 0 이다",
-            SUBSCRIPTION_CONFLICT: (
-                "라이브 구독 모델에서는 판매자 편중이 정상 행동이다. "
-                "제외 시 성능과 정밀도가 함께 올라 순이득이었다"
+            OUT_OF_RANGE: (
+                "eBay 는 경매 기간을 1~10 '일' 로 기록한다. 우리는 라이브(분 단위)와 "
+                "일반 경매(판매자 자유 설정)가 섞여 이 값이 '긴 경매인가' 가 아니라 "
+                "'라이브냐 일반이냐' 를 가리키게 된다. 학습 때 없던 의미다"
+            ),
+            UNSPECIFIABLE: (
+                "원식과 방향을 특정할 수 없다. Class 와의 상관이 +0.043 이고 정규화 기준도 "
+                "알 수 없어, 우리가 추정한 식의 방향이 반대면 모델이 정반대로 읽는다. "
+                "5시드 짝비교에서 빼도 차이가 없어(PR-AUC +0.0016 ± 0.0090) 위험만 없앴다"
+            ),
+        },
+        "redefined_features": {
+            REDEFINED: (
+                "구독하지 않은 판매자에 대한 편중도로 재정의한다. eBay 에는 구독 개념이 "
+                "없어 학습은 원본 값 그대로 하고, 서빙에서만 구독 건을 분자·분모에서 뺀다"
             ),
         },
         "holdout": {
@@ -145,7 +181,15 @@ def main() -> None:
             "eBay 데이터로 학습했으므로 우리 서비스 성능이 아니다. 파이프라인 검증용이다.",
             "Bidding_Ratio 상한이 다르다. 우리 정책상 한 입찰자의 비중은 (n+1)/2n 을 넘을 수 없다.",
             "eBay 라벨은 Successive_Outbidding 에 강하게 의존한다. A 구성의 0.99 는 인용하지 말 것.",
+            "holdout 은 단일 시드 결과다. 시드 간 표준편차가 0.02~0.06 이므로 0.01 수준의 "
+            "차이로 피처 조합을 판단하지 말 것. seed_variance 를 함께 볼 것.",
         ],
+        "seed_variance": {
+            "seeds": list(SEEDS),
+            "pr_auc": {"mean": round(mean(pr), 4), "std": round(stdev(pr), 4)},
+            "precision": {"mean": round(mean(prec), 4), "std": round(stdev(prec), 4)},
+            "recall": {"mean": round(mean(rec), 4), "std": round(stdev(rec), 4)},
+        },
         "serving_features_contract": list(SERVING_FEATURES),
     }
     (OUT / "model_meta.json").write_text(

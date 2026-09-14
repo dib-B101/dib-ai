@@ -15,27 +15,25 @@ import numpy as np
 
 # 피처가 "높을 때" 무엇을 뜻하는지. 기여도가 양수일 때 쓰는 문구다.
 _HIGH = {
-    "Bidder_Tendency": "특정 판매자 경매에 반복 참여한 정도가 높습니다",
+    "Bidder_Tendency": "구독하지 않은 특정 판매자의 경매에 반복 참여했습니다",
     "Bidding_Ratio": "이 경매의 입찰을 많이 차지했습니다",
     "Last_Bidding": "경매 후반까지 입찰을 이어갔습니다",
     "Auction_Bids": "평균보다 입찰이 많이 몰린 경매입니다",
     "Starting_Price_Average": "유사 경매 평균보다 시작가가 낮았습니다",
     "Early_Bidding": "경매 초반부터 입찰에 참여했습니다",
     "Winning_Ratio": "참여한 경매 대비 낙찰이 적습니다",
-    "Auction_Duration": "경매 기간이 깁니다",
     "Successive_Outbidding": "자기 자신을 연속으로 추월했습니다",
 }
 
 # 낮을 때. 위험 방향이 반대인 경우를 위해 따로 둔다.
 _LOW = {
-    "Bidder_Tendency": "판매자 편중이 낮습니다",
+    "Bidder_Tendency": "여러 판매자의 경매에 고루 참여했습니다",
     "Bidding_Ratio": "입찰 비중이 낮습니다",
     "Last_Bidding": "일찍 입찰을 멈췄습니다",
     "Auction_Bids": "입찰이 적은 경매입니다",
     "Starting_Price_Average": "시작가가 평균 이상이었습니다",
     "Early_Bidding": "뒤늦게 입찰에 참여했습니다",
     "Winning_Ratio": "참여한 경매를 대체로 낙찰받았습니다",
-    "Auction_Duration": "경매 기간이 짧습니다",
     "Successive_Outbidding": "연속 추월이 없었습니다",
 }
 

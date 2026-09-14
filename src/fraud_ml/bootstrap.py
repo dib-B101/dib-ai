@@ -40,20 +40,46 @@ ID_COLS = ("Record_ID", "Auction_ID", "Bidder_ID")
 # 따라서 이 값은 모든 행에서 항상 0 이며, 학습에 넣을 수 없다.
 LEAKED = "Successive_Outbidding"
 
-# 라이브 구독 모델에서는 구독자가 좋아하는 방송자의 경매에만 참여하는 것이 정상이다.
-# eBay 모델은 "판매자 편중이 높으면 위험" 으로 배우므로 충성 고객이 고위험으로 찍힌다.
-# 실험 결과 제외하는 편이 성능·오탐 양쪽에서 낫기도 해서 서빙 피처에서 뺀다.
-SUBSCRIPTION_CONFLICT = "Bidder_Tendency"
+# eBay 는 경매 기간을 1·3·5·7·10 "일" 로 기록한다. 우리 경매는 몇 분에서 한 시간이라
+# 모든 값이 학습 범위 왼쪽 바깥으로 떨어진다. 트리는 우리 데이터를 전부 같은 쪽으로
+# 보내므로 이 피처는 서빙에서 상수가 된다 — eBay 평가 점수와 무관하게 죽은 피처다.
+#
+# 다른 코퍼스 상대 피처(Auction_Bids · Starting_Price_Average)는 eBay 값 자체가
+# 0~1 정규화라 우리 코퍼스로 같은 변환을 하면 의미가 대응된다. 이것만 절대 단위라
+# 대응점이 없다.
+OUT_OF_RANGE = "Auction_Duration"
+
+# 원식과 방향을 특정할 수 없다. 데이터를 열어보면 정상 중앙값 0.000 / 허위 중앙값 0.961 의
+# 이봉 분포인데 Class 와의 상관은 +0.043 로 거의 0 이다. 정규화 기준(판매자별·카테고리별·
+# 전체)도, 값을 뒤집었는지도 알 수 없다.
+#
+# 학습은 eBay 원본 값으로 하고 서빙은 우리가 추정한 식으로 계산하므로, **방향이 반대면
+# 모델이 정반대로 읽는다.** 아예 빼는 것보다 나쁘다. 5시드 짝비교에서 빼도 성능 차이가
+# 없었으므로(PR-AUC +0.0016 ± 0.0090) 위험만 없앴다.
+UNSPECIFIABLE = "Starting_Price_Average"
+
+# 판매자 편중도는 **재정의해서 쓴다.**
+#
+# eBay 정의 그대로 쓰면 구독 모델에서 단골 구매자가 고위험으로 찍힌다. 그래서
+# 서빙에서는 구독 중인 판매자와의 참여를 분자·분모에서 빼고 계산한다.
+#
+#     편중도 = (구독하지 않은 판매자 경매 참여 수) / (구독하지 않은 전체 참여 수)
+#
+# eBay 데이터에는 구독 개념이 없어 뺄 것이 없으므로, **학습은 원본 값 그대로** 하고
+# 서빙에서만 구독 건을 제외한다. "높으면 의심" 이라는 의미가 양쪽에서 유지된다.
+REDEFINED = "Bidder_Tendency"
 
 # 서빙 입력 스키마. 백엔드가 준비해야 할 값이자 model_meta.json 의 계약이다.
+#
+# 성능만 보면 어느 조합도 유의미하게 낫지 않다(5시드 기준 표준편차가 조합 간 차이보다
+# 크다). 그래서 **우리 데이터로 재현 가능한가**를 기준으로 골랐다.
 SERVING_FEATURES = (
     "Bidding_Ratio",
     "Last_Bidding",
     "Auction_Bids",
-    "Starting_Price_Average",
     "Early_Bidding",
     "Winning_Ratio",
-    "Auction_Duration",
+    "Bidder_Tendency",
 )
 
 
@@ -183,18 +209,21 @@ def experiments(df: pd.DataFrame) -> list[tuple[str, tuple[str, ...]]]:
 
     A  9개 전부           이 데이터셋의 상한. 우리는 쓸 수 없으므로 참고용이다
     B  A − 누수 피처       Successive_Outbidding 은 정책상 항상 0 이라 계산 불가
-    C  B − 판매자 편중도   구독 모델과 충돌한다. **서빙 채택 구성**
+    C  B − 경매 기간 − 시작가   재현 불가한 둘을 뺀 것. **서빙 채택 구성**
     D  상위 3개만          최소 구성으로 어디까지 되는지
 
-    C 가 B 보다 성능이 좋다는 점이 중요하다. 구독 충돌을 피하려고 성능을 포기하는
-    트레이드오프가 아니라, 빼는 편이 오탐까지 줄어드는 순이득이다.
+    **단일 시드 결과로 조합을 고르지 말 것.** 5시드로 재보면 표준편차가 0.02~0.06 이라
+    조합 간 차이가 대부분 그 안에 들어간다. 성능으로는 우열을 가릴 수 없으므로
+    "우리 데이터로 재현 가능한가" 를 기준으로 C 를 골랐다.
     """
     all_feats = tuple(c for c in df.columns if c not in ID_COLS + (TARGET,))
     without_leak = tuple(f for f in all_feats if f != LEAKED)
-    without_both = tuple(f for f in without_leak if f != SUBSCRIPTION_CONFLICT)
+    without_both = tuple(
+        f for f in without_leak if f not in (OUT_OF_RANGE, UNSPECIFIABLE)
+    )
     return [
         ("A. 전체 9개 — 참고용, 누수 포함", all_feats),
         ("B. Successive_Outbidding 제외 — 정책상 항상 0", without_leak),
-        ("C. B + Bidder_Tendency 제외 — 구독 충돌", without_both),
+        ("C. B + 경매기간·시작가 제외 — 재현 불가", without_both),
         ("D. 상위 3개만 — 최소 구성", ("Bidding_Ratio", "Winning_Ratio", "Bidder_Tendency")),
     ]
