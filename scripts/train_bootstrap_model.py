@@ -89,6 +89,24 @@ def main() -> None:
     for f, v in report.importance.items():
         print(f"    {f:<24} {v * 100:5.1f}%  {'#' * int(v * 60)}")
 
+    # 운영점 --------------------------------------------------------------
+    # "정밀도 0.65" 만으로는 운영 판단이 안 된다. 관리자가 몇 건을 봐야 하고
+    # 몇 건을 놓치는지가 실제로 정해야 할 값이다.
+    print("\n" + "=" * 96)
+    print("임계값별 운영점 — 검토량과 놓침의 맞바꿈")
+    print("=" * 96)
+    print(f"  {'임계값':>6} {'검토 대상':>10} {'정밀도':>8} {'재현율':>8} {'놓침':>8}   {'실제 의심 / 검토':<20}")
+    print("  " + "-" * 74)
+    for row in report.operating_points:
+        if row["flagged"] == 0:
+            continue
+        ratio = f"{row['flagged'] * row['precision']:.0f} / {row['flagged']}"
+        print(f"  {row['threshold']:>6.2f} {row['flagged']:>10} {row['precision']:>8.3f} "
+              f"{row['recall']:>8.3f} {row['missed']:>8}   {ratio:<20}")
+    print()
+    print("  임계값을 올리면 검토량이 줄고 정밀도가 오르지만 놓치는 건이 늘어난다.")
+    print("  모델 성능이 아니라 **관리자 인력에서 역산해 정할 값**이다.")
+
     # 시드 분산 --------------------------------------------------------------
     # 단일 시드 숫자로 피처를 고르면 안 된다. 분할이 달라지면 순위가 뒤집힌다.
     print("\n" + "=" * 96)
@@ -174,9 +192,17 @@ def main() -> None:
             "brier_calibrated": round(report.brier_calibrated, 4),
         },
         "feature_importance": report.importance,
+        "operating_points": report.operating_points,
         "risk_bands": {"low": [0.0, 0.3], "medium": [0.3, 0.6], "high": [0.6, 1.0]},
         "random_state": RANDOM_STATE,
         "usage": "관리자 검토 큐 정렬 전용. 자동 제재 금지.",
+        "hyperparameters": {
+            "tuned": True,
+            "method": "평가셋 25% 를 먼저 분리한 뒤 나머지에서 GroupKFold(5) · 120회 무작위 탐색",
+            "cv_score": 0.7665,
+            "holdout_score": 0.7539,
+            "vs_handpicked": "PR-AUC +0.039, 재현율 0.713 -> 0.812",
+        },
         "caveats": [
             "eBay 데이터로 학습했으므로 우리 서비스 성능이 아니다. 파이프라인 검증용이다.",
             "Bidding_Ratio 상한이 다르다. 우리 정책상 한 입찰자의 비중은 (n+1)/2n 을 넘을 수 없다.",

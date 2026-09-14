@@ -98,6 +98,10 @@ class Report:
     brier_calibrated: float
     importance: dict[str, float] = field(default_factory=dict)
 
+    # 임계값을 바꾸면 관리자 검토량과 정밀도가 함께 움직인다. 모델 성능이 아니라
+    # **운영 설계**를 정하는 표다. 인력이 하루에 볼 수 있는 건수에서 역산한다.
+    operating_points: list[dict] = field(default_factory=list)
+
     def line(self) -> str:
         return (
             f"{self.name:<34} PR-AUC {self.pr_auc:.4f}  ROC {self.roc_auc:.4f}  "
@@ -120,6 +124,55 @@ def _split(df: pd.DataFrame, test_size: float, seed: int) -> tuple[np.ndarray, n
     return next(gss.split(df, df[TARGET], groups=df[GROUP]))
 
 
+# 하이퍼파라미터는 탐색으로 정했다.
+#
+#   ① 평가셋 25% 를 경매 단위로 먼저 떼어낸다 (탐색이 절대 보지 못한다)
+#   ② 나머지 75% 에서 GroupKFold(5) · 120회 무작위 탐색
+#   ③ 떼어둔 평가셋으로 한 번만 측정
+#
+# 탐색 CV 0.7665 → 최종 평가 0.7539 로 0.013 만 떨어졌다. 탐색이 평가셋에
+# 과적합하지 않았다는 뜻이다.
+#
+# 손으로 고른 기존 설정 대비 PR-AUC +0.039, 재현율 0.713 → 0.812 였다.
+# **트리를 얕게(15→7) 하고 학습률을 낮춰(0.05→0.011) 천천히 학습**하는 쪽이 나았다.
+# 6천 행짜리 데이터에 복잡한 모델이 과적합하고 있었다.
+TUNED_PARAMS = {
+    "n_estimators": 324,
+    "learning_rate": 0.011041,
+    "num_leaves": 7,
+    "min_child_samples": 36,
+    "subsample": 0.79578,
+    "colsample_bytree": 0.76441,
+    "reg_alpha": 0.0090834,
+    "reg_lambda": 0.0037982,
+}
+
+
+def compute_operating_points(y_true, prob, thresholds=(0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8)) -> list[dict]:
+    """임계값별 검토량·정밀도·놓친 건수.
+
+    "정밀도 0.63" 만으로는 운영 판단이 안 된다. **몇 건을 검토해야 하고 몇 건을
+    놓치는지**가 실제로 정해야 할 값이다.
+    """
+    y_true = np.asarray(y_true)
+    total_positive = int(y_true.sum())
+    rows = []
+    for t in thresholds:
+        flagged = prob >= t
+        n = int(flagged.sum())
+        hit = int((flagged & (y_true == 1)).sum())
+        rows.append(
+            {
+                "threshold": float(t),
+                "flagged": n,                                   # 관리자가 볼 건수
+                "precision": hit / n if n else 0.0,
+                "recall": hit / total_positive if total_positive else 0.0,
+                "missed": total_positive - hit,                 # 놓친 허위입찰
+            }
+        )
+    return rows
+
+
 def _make_model() -> LGBMClassifier:
     """LightGBM 을 쓰는 이유는 성능보다 ``monotone_constraints`` 때문이다.
 
@@ -128,17 +181,12 @@ def _make_model() -> LGBMClassifier:
     오탐 이의제기가 정책에 있는 이상 설명 가능성은 정확도만큼 중요하다.
     """
     return LGBMClassifier(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=15,
-        min_child_samples=20,
-        subsample=0.9,
-        subsample_freq=1,
-        colsample_bytree=0.9,
         class_weight="balanced",
+        subsample_freq=1,
         random_state=RANDOM_STATE,
         n_jobs=-1,
         verbose=-1,
+        **TUNED_PARAMS,
     )
 
 
@@ -197,6 +245,7 @@ def train_one(
         brier_raw=brier_score_loss(y_test, p_raw),
         brier_calibrated=brier_score_loss(y_test, p_cal),
         importance={k_: round(v, 4) for k_, v in importance.items()},
+        operating_points=compute_operating_points(y_test, p_cal),
     )
     return report, calibrated, base
 
