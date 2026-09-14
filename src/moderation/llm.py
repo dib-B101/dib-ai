@@ -142,27 +142,15 @@ class ModerationLLM(Protocol):
 
 # ------------------------------------------------------------------ 입력 구성
 
-IMAGE_FETCH_TIMEOUT = 5.0
-
-
 def _read_bytes(path: str | Path) -> bytes | None:
     """로컬 경로든 URL 이든 원본 바이트를 가져온다.
 
     백엔드는 S3 URL 을 보내고 테스트는 로컬 파일을 쓴다. 둘 다 받는다.
+    임베딩 쪽과 같은 일이라 공용 모듈로 뺐다.
     """
-    text = str(path)
-    if text.startswith(("http://", "https://")):
-        import urllib.request
+    from media import read_image_bytes
 
-        try:
-            with urllib.request.urlopen(text, timeout=IMAGE_FETCH_TIMEOUT) as resp:
-                return resp.read()
-        except Exception:
-            log.warning("이미지 다운로드 실패: %s", text)
-            return None
-
-    p = Path(text)
-    return p.read_bytes() if p.exists() else None
+    return read_image_bytes(path)
 
 
 def encode_image(path: str | Path) -> str | None:
