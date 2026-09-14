@@ -17,7 +17,8 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
 | 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
 | 추천 — 인기순 (STEP 1) | 구현 완료 | `src/reco/`, `src/reco_api/` |
-| 추천 — 임베딩·개인화 (STEP 2~) | 미착수 (스키마 대기) | TBD |
+| 추천 — 상품 임베딩 (STEP 2) | 구현 완료, DB 컬럼 대기 | `src/embedding/` |
+| 추천 — 개인화 (STEP 3~) | 미착수 | TBD |
 
 ## 폴더 구조
 
@@ -35,8 +36,9 @@ dib-ai/
 │   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
 │   │   ├── rules.py          규칙 5종
 │   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
-│   ├── serve.py              두 API 를 한 서버에 띄우는 진입점
+│   ├── serve.py              세 API 를 한 서버에 띄우는 진입점
 │   ├── envfile.py            .env 로더
+│   ├── media.py              이미지 읽기 공용 유틸 (검수·임베딩이 함께 쓴다)
 │   ├── fraud_api/            HTTP 계층
 │   │   ├── main.py           FastAPI 앱 · 엔드포인트
 │   │   ├── models.py         요청·응답 스키마. 백엔드와의 계약
@@ -58,11 +60,14 @@ dib-ai/
 │   │   ├── schema.py         입출력 자료구조. DB 를 모른다
 │   │   ├── config.py         YAML 로더 + 가중치 검증
 │   │   └── popularity.py     인기순 랭킹. 개인화는 boost 훅으로 끼운다
-│   └── reco_api/             HTTP 계층
-│       ├── main.py           엔드포인트
-│       ├── models.py         요청·응답 스키마
-│       ├── provider.py       후보 조회기
-│       └── demo.py           합성 후보
+│   ├── reco_api/             HTTP 계층
+│   │   ├── main.py           엔드포인트
+│   │   ├── models.py         요청·응답 스키마
+│   │   ├── provider.py       후보 조회기
+│   │   └── demo.py           합성 후보
+│   └── embedding/            상품 임베딩 (추천 STEP 2)
+│       ├── config.py         모델·차원. DB 컬럼과 항상 같아야 한다
+│       └── encoder.py        TextEncoder(1024) · ImageEncoder(768)
 ├── tests/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
@@ -72,11 +77,14 @@ dib-ai/
 │   ├── test_moderation_api.py  검수 API 계약 검증
 │   ├── test_reco.py          랭킹 검증
 │   ├── test_reco_api.py      추천 API 계약 검증
+│   ├── test_embedding.py     임베딩 유틸 검증
 │   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
 │   ├── train_bootstrap_model.py   ML 부트스트랩 학습
-│   └── check_moderation_llm.py    검수 모델 실호출 점검
+│   ├── check_moderation_llm.py    검수 모델 실호출 점검
+│   ├── check_moderation_image.py  이미지 검수 실호출 점검
+│   └── check_embedding.py         임베딩 품질 점검
 ├── notebooks/
 │   └── shill_bidding_eda.ipynb   eBay 데이터셋 EDA
 ├── data/
@@ -96,7 +104,7 @@ pip install -r requirements.txt
 
 cp .env.example .env                    # 그리고 API 키를 채운다
 
-python -m pytest                        # 테스트 131개
+python -m pytest                        # 테스트 145개
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
@@ -541,6 +549,19 @@ python scripts/check_moderation_llm.py
 연결 확인과 프롬프트 품질 점검을 겸한다. 게이트웨이 오류는 상태코드만으로 원인을 알 수
 없어 응답 본문을 함께 보여준다.
 
+### 이미지 검수 점검
+
+```bash
+python scripts/check_moderation_image.py 사진.jpg [사진2.jpg ...]
+```
+
+**응답이 오는 것만으로는 이미지가 쓰였다고 말할 수 없다.** 인코딩이 실패했거나
+게이트웨이가 이미지를 빼고 보냈어도 텍스트만으로 답이 돌아온다.
+
+그래서 같은 상품을 두 번 부른다 — 텍스트만 한 번, 텍스트+이미지 한 번. 판정이 달라지면
+이미지가 모델에 닿은 것이다. 상품명은 일부러 중립적으로 둔다("미개봉 새제품 팝니다").
+"전자담배 팝니다" 라고 쓰면 이미지를 안 봐도 차단되므로 아무것도 검증하지 못한다.
+
 ## 설계 원칙
 
 **오탐이 미탐보다 비싸다.** 정상 상품을 막으면 판매자가 이탈하지만, 금지 품목이 한 번
@@ -668,3 +689,75 @@ PYTHONPATH=src uvicorn serve:app --reload --port 8000
   최상위를 이길 수 없다**(0.4 < 0.6). 이 균형을 바꾸려면 YAML 을 고친다
 - 지표가 0 인 신규 상품은 마감이 다가와야 올라온다. 노출 기회를 더 주려면 별도의
   신규 가점이 필요하다
+
+---
+
+# 상품 임베딩 (추천 STEP 2)
+
+상품을 벡터로 바꿔 유사도를 계산할 수 있게 한다.
+
+| 대상 | 모델 | 차원 |
+| --- | --- | --- |
+| 제목 + 설명 | `BAAI/bge-m3` | 1024 |
+| 대표 이미지 | `google/siglip-base-patch16-224` | 768 |
+
+## 왜 벡터를 두 개로 두나
+
+**텍스트와 이미지는 서로 다른 공간이다.** 차원이 다를 뿐 아니라 각 축이 뜻하는 바가
+전혀 달라서, 두 벡터를 더하는 것은 키(cm)와 몸무게(kg)를 더하는 것과 같다.
+
+각 공간 안에서 따로 유사도를 구한 뒤 **숫자를 가중합**한다. 코사인 유사도는 차원과
+무관하게 −1~1 사이 값 하나라 합치는 데 문제가 없다.
+
+```
+similarity = 0.6 × pct(텍스트 유사도) + 0.4 × pct(이미지 유사도)
+```
+
+백분위를 먼저 적용하는 이유는 두 유사도의 분포가 다르기 때문이다. 이미지 유사도가 좁은
+범위에 몰려 있으면 가중치 0.4 가 이름뿐인 값이 된다.
+
+## 세 가지를 인코더가 보장한다
+
+**저장 전에 L2 정규화한다.** 길이를 1 로 맞추면 코사인 유사도가 내적과 같아져 pgvector
+쿼리가 빨라진다. 빠뜨리면 설명이 긴 상품이 내용과 무관하게 유리해진다.
+
+**출력 차원을 검증한다.** 모델을 바꿨는데 DB 컬럼이 그대로면 INSERT 시점에야 터진다.
+로드하자마자 확인해 일찍 실패시킨다.
+
+**읽지 못한 이미지는 건너뛴다.** 사진 한 장이 깨졌다고 수천 건짜리 배치가 통째로
+실패하면 안 된다. 어느 것이 빠졌는지는 인덱스로 돌려준다.
+
+## 모델 선택
+
+BGE-M3 는 최대 8,192 토큰이라 **긴 상품 설명이 잘리지 않는다.** 한국어 경량 모델은
+512 토큰이라 설명이 길면 뒷부분이 통째로 누락되고 그만큼 유사도가 왜곡된다.
+
+이미지는 **대표 이미지 1장만** 쓴다. 여러 장을 평균 내면 배경·바닥면·포장지가 섞여
+상품 자체의 특징이 희석된다. MVP 는 1장으로 시작하고 데이터로 확인한 뒤 판단한다.
+
+## 점검
+
+```bash
+python scripts/check_embedding.py
+python scripts/check_embedding.py --image 사진1.jpg 사진2.jpg
+```
+
+**벡터가 나오는 것만으로는 아무것도 증명되지 않는다.** 비슷한 상품끼리 실제로 가깝게
+나오는지 봐야 한다. 서로 다른 카테고리의 상품을 넣고 유사도 행렬을 출력한다.
+
+첫 실행은 모델 다운로드로 몇 분 걸린다.
+
+## 설정
+
+```bash
+EMBED_DEVICE=cuda           # 비워 두면 GPU 가 있으면 쓰고 없으면 CPU
+EMBED_TEXT_BATCH=16
+EMBED_IMAGE_BATCH=16
+```
+
+GPU 기준 BGE-M3(fp16) 약 1.1GB + SigLIP 약 0.4GB 다.
+
+## 알려진 한계
+
+- **DB 컬럼이 아직 없다.** `product_embedding` 테이블이 생기면 배치 작업을 붙인다
+- 모델 품질은 실제 상품 데이터로 확인해야 한다. 현재 점검은 합성 샘플 5건이다
