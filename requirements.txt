@@ -28,3 +28,16 @@ pyahocorasick>=2.0   # 금칙어 다중 패턴 매칭
 pillow>=10.0         # 이미지 리사이즈 (토큰 절감)
 anthropic>=0.40      # 2차 AI 검수 — Claude
 openai>=1.40         # 2차 AI 검수 — GPT (둘 중 하나만 있어도 동작)
+
+# 상품 임베딩 (추천 STEP 2)
+#
+# GPU 를 쓰려면 torch·torchvision 을 CUDA 빌드로 따로 설치해야 한다.
+# 아래 pip install 로는 CPU 판이 깔린다.
+#
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#
+# torchvision 은 SigLIP 이미지 전처리에 필요하다.
+torch>=2.4
+torchvision>=0.19
+transformers>=4.44
+sentence-transformers>=3.0   # BGE-M3 로더

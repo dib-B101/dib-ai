@@ -55,4 +55,5 @@ artifacts/
 .ipynb_checkpoints/
 
 # 백엔드가 관리하는 ERD 스냅샷. 참고용으로만 두고 추적하지 않는다.
+# 여기 사본을 두면 백엔드가 고칠 때마다 조용히 낡는다.
 dib.sql
