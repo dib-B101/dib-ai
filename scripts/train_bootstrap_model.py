@@ -30,7 +30,7 @@ from fraud_ml.bootstrap import (  # noqa: E402
     LEAKED,
     OUT_OF_RANGE,
     REDEFINED,
-    UNSPECIFIABLE,
+
     RANDOM_STATE,
     SERVING_FEATURES,
     TARGET,
@@ -43,10 +43,8 @@ from fraud_ml.explain import top_reasons  # noqa: E402
 CSV = ROOT / "data" / "Shill Bidding Dataset.csv"
 OUT = ROOT / "artifacts"
 
-
 # 피처 조합을 단일 시드로 판단하지 않기 위한 재측정용 시드.
 SEEDS = (42, 7, 123, 2024, 31337)
-
 
 def main() -> None:
     df = load(CSV)
@@ -131,8 +129,6 @@ def main() -> None:
     print(f"  제외   {LEAKED:<24} 정책상 최고 입찰자의 연속 입찰이 불가능해 항상 0")
     print(f"  제외   {OUT_OF_RANGE:<24} 라이브(분)와 일반 경매(판매자 자유)가 섞여")
     print(f"  {'':8}{'':<24} '긴 경매인가' 가 아니라 '경매 유형' 을 가리키게 된다")
-    print(f"  제외   {UNSPECIFIABLE:<24} 원식·방향을 특정할 수 없다 (Class 상관 +0.043).")
-    print(f"  {'':8}{'':<24} 방향이 반대면 모델이 정반대로 읽는다")
     print(f"  재정의 {REDEFINED:<24} 구독하지 않은 판매자에 대한 편중도로 바꿔 쓴다.")
     print(f"  {'':8}{'':<24} eBay 에는 구독이 없어 학습은 원본 그대로 하고,")
     print(f"  {'':8}{'':<24} 서빙에서만 구독 건을 빼면 '높으면 의심' 이 유지된다")
@@ -170,11 +166,6 @@ def main() -> None:
                 "eBay 는 경매 기간을 1~10 '일' 로 기록한다. 우리는 라이브(분 단위)와 "
                 "일반 경매(판매자 자유 설정)가 섞여 이 값이 '긴 경매인가' 가 아니라 "
                 "'라이브냐 일반이냐' 를 가리키게 된다. 학습 때 없던 의미다"
-            ),
-            UNSPECIFIABLE: (
-                "원식과 방향을 특정할 수 없다. Class 와의 상관이 +0.043 이고 정규화 기준도 "
-                "알 수 없어, 우리가 추정한 식의 방향이 반대면 모델이 정반대로 읽는다. "
-                "5시드 짝비교에서 빼도 차이가 없어(PR-AUC +0.0016 ± 0.0090) 위험만 없앴다"
             ),
         },
         "redefined_features": {
@@ -225,7 +216,6 @@ def main() -> None:
     print("\n" + "=" * 96)
     print(f"저장  {OUT / 'shill_lgbm_v0.joblib'}")
     print(f"저장  {OUT / 'model_meta.json'}")
-
 
 if __name__ == "__main__":
     main()

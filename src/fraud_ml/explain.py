@@ -17,7 +17,7 @@ import numpy as np
 _HIGH = {
     "Bidder_Tendency": "구독하지 않은 특정 판매자의 경매에 반복 참여했습니다",
     "Bidding_Ratio": "이 경매의 입찰을 많이 차지했습니다",
-    "Last_Bidding": "경매 후반까지 입찰을 이어갔습니다",
+    "Last_Bidding": "가격을 올려놓고 경매 후반에는 입찰을 멈췄습니다",
     "Auction_Bids": "평균보다 입찰이 많이 몰린 경매입니다",
     "Starting_Price_Average": "유사 경매 평균보다 시작가가 낮았습니다",
     "Early_Bidding": "경매 초반부터 입찰에 참여했습니다",
@@ -29,7 +29,7 @@ _HIGH = {
 _LOW = {
     "Bidder_Tendency": "여러 판매자의 경매에 고루 참여했습니다",
     "Bidding_Ratio": "입찰 비중이 낮습니다",
-    "Last_Bidding": "일찍 입찰을 멈췄습니다",
+    "Last_Bidding": "경매 후반까지 입찰을 이어갔습니다",
     "Auction_Bids": "입찰이 적은 경매입니다",
     "Starting_Price_Average": "시작가가 평균 이상이었습니다",
     "Early_Bidding": "뒤늦게 입찰에 참여했습니다",

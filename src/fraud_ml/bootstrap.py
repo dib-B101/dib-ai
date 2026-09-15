@@ -49,14 +49,22 @@ LEAKED = "Successive_Outbidding"
 # 대응점이 없다.
 OUT_OF_RANGE = "Auction_Duration"
 
-# 원식과 방향을 특정할 수 없다. 데이터를 열어보면 정상 중앙값 0.000 / 허위 중앙값 0.961 의
-# 이봉 분포인데 Class 와의 상관은 +0.043 로 거의 0 이다. 정규화 기준(판매자별·카테고리별·
-# 전체)도, 값을 뒤집었는지도 알 수 없다.
+# 서빙 피처의 계산식 (원 논문 기준). 값이 클수록 위험하다.
 #
-# 학습은 eBay 원본 값으로 하고 서빙은 우리가 추정한 식으로 계산하므로, **방향이 반대면
-# 모델이 정반대로 읽는다.** 아예 빼는 것보다 나쁘다. 5시드 짝비교에서 빼도 성능 차이가
-# 없었으므로(PR-AUC +0.0016 ± 0.0090) 위험만 없앴다.
-UNSPECIFIABLE = "Starting_Price_Average"
+#   Bidder_Tendency   특정 판매자 경매 참여 수 / 전체 경매 참여 수
+#                     (우리는 구독 중인 판매자와의 참여를 분자·분모에서 뺀다)
+#   Bidding_Ratio     이 입찰자의 입찰 수 / 경매 전체 입찰 수
+#   Last_Bidding      (경매 종료 − 마지막 입찰) / 전체 시간
+#                     ← 높을수록 **일찍 멈춘 것**이다. 가격만 올려놓고 빠지는 패턴
+#   Early_Bidding     1 − (첫 입찰 − 경매 시작) / 전체 시간
+#   Auction_Bids      1 − 평균 입찰 수 / 이 경매 입찰 수   (이 경매 > 평균일 때, 아니면 0)
+#   Starting_Price_Average
+#                     1 − 이 시작가 / 평균 시작가          (이 시작가 < 평균일 때, 아니면 0)
+#   Winning_Ratio     1 − 낙찰 수 / 적극 참여 경매 수
+#                     적극 참여 = 그 경매에서 Bidding_Ratio 가 0.1 을 넘은 것
+#
+# 데이터로 검증했다. 경매별 Bidding_Ratio 합이 모든 경매에서 정확히 1.0 이고,
+# Auction_Bids 식으로 역산한 "평균 입찰 수" 가 17.94 ± 0.73 로 상수에 수렴한다.
 
 # 판매자 편중도는 **재정의해서 쓴다.**
 #
@@ -77,6 +85,7 @@ SERVING_FEATURES = (
     "Bidding_Ratio",
     "Last_Bidding",
     "Auction_Bids",
+    "Starting_Price_Average",
     "Early_Bidding",
     "Winning_Ratio",
     "Bidder_Tendency",
@@ -258,7 +267,7 @@ def experiments(df: pd.DataFrame) -> list[tuple[str, tuple[str, ...]]]:
 
     A  9개 전부           이 데이터셋의 상한. 우리는 쓸 수 없으므로 참고용이다
     B  A − 누수 피처       Successive_Outbidding 은 정책상 항상 0 이라 계산 불가
-    C  B − 경매 기간 − 시작가   재현 불가한 둘을 뺀 것. **서빙 채택 구성**
+    C  B − 경매 기간       우리 경매 범위가 학습 범위 밖. **서빙 채택 구성**
     D  상위 3개만          최소 구성으로 어디까지 되는지
 
     **단일 시드 결과로 조합을 고르지 말 것.** 5시드로 재보면 표준편차가 0.02~0.06 이라
@@ -267,12 +276,10 @@ def experiments(df: pd.DataFrame) -> list[tuple[str, tuple[str, ...]]]:
     """
     all_feats = tuple(c for c in df.columns if c not in ID_COLS + (TARGET,))
     without_leak = tuple(f for f in all_feats if f != LEAKED)
-    without_both = tuple(
-        f for f in without_leak if f not in (OUT_OF_RANGE, UNSPECIFIABLE)
-    )
+    without_both = tuple(f for f in without_leak if f != OUT_OF_RANGE)
     return [
         ("A. 전체 9개 — 참고용, 누수 포함", all_feats),
         ("B. Successive_Outbidding 제외 — 정책상 항상 0", without_leak),
-        ("C. B + 경매기간·시작가 제외 — 재현 불가", without_both),
+        ("C. B + Auction_Duration 제외 — 학습 범위 밖", without_both),
         ("D. 상위 3개만 — 최소 구성", ("Bidding_Ratio", "Winning_Ratio", "Bidder_Tendency")),
     ]

@@ -12,7 +12,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | --- | --- | --- |
 | 이상거래 탐지 — 규칙 기반 베이스라인 | 구현 완료 | `src/fraud/` |
 | 이상거래 탐지 — HTTP API | 구현 완료 | `src/fraud_api/` |
-| 이상거래 탐지 — ML 트랙 | 부트스트랩 학습 완료, 서빙 미연결 | `src/fraud_ml/` |
+| 이상거래 탐지 — ML 트랙 | 학습 · 서빙 연결 완료 (`w_ml=0` 기본) | `src/fraud_ml/`, `src/fraud/ml_features.py` |
 | 상품 검수 — 1차 규칙 필터 | 구현 완료 | `src/moderation/` |
 | 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
 | 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
@@ -32,7 +32,8 @@ dib-ai/
 │   │   ├── __init__.py       공개 API (RuleConfig, detect, combine)
 │   │   ├── schema.py         입출력 자료구조. DB 를 모른다
 │   │   ├── config.py         YAML 로더
-│   │   ├── features.py       피처 계산기. 나중에 ML 트랙과 공용
+│   │   ├── features.py       규칙용 피처 계산기
+│   │   ├── ml_features.py    ML 서빙 피처. 원 논문 식을 우리 데이터로 옮긴 것
 │   │   ├── rules.py          규칙 5종
 │   │   └── engine.py         오케스트레이션 · 실패 격리 · 점수 결합
 │   ├── serve.py              두 API 를 한 서버에 띄우는 진입점
@@ -44,6 +45,7 @@ dib-ai/
 │   │   └── demo.py           합성 경매. bid 테이블 없이 API 를 호출해 볼 수 있다
 │   ├── fraud_ml/             ML 트랙 (부트스트랩)
 │   │   ├── bootstrap.py      학습 · 확률 보정 · 절제 실험
+│   │   ├── predict.py        모델 로드 · 점수 계산
 │   │   └── explain.py        SHAP 기여도 → 한국어 탐지 사유
 │   ├── moderation/           상품 검수 (라이브러리)
 │   │   ├── schema.py         입출력 자료구조. DB 도 HTTP 도 모른다
@@ -67,6 +69,8 @@ dib-ai/
 │   ├── fixtures.py           합성 시나리오 7종
 │   ├── test_rules.py         규칙별 검증
 │   ├── test_engine.py        티켓 완료 조건 검증
+│   ├── test_ml_features.py   ML 서빙 피처 식 검증
+│   ├── test_fraud_ml_serving.py  모델 로딩 · 서빙 연결 검증
 │   ├── test_api.py           탐지 API 계약 검증
 │   ├── test_moderation.py    검수 파이프라인 검증
 │   ├── test_moderation_api.py  검수 API 계약 검증
@@ -416,6 +420,54 @@ Brier  0.0554 → 0.0447   (보정 후 19% 개선)
 
 어느 임계값에서도 자동 제재는 불가능하다. 관리자 검토 큐 정렬 전용이다.
 `model_meta.json` 의 `operating_points` 에 같은 표가 저장된다.
+
+## 서빙 연결
+
+모델은 학습해 두는 것으로 끝나지 않는다. **우리 데이터에서 피처를 계산해 넣어야** 점수가
+나온다. `src/fraud/ml_features.py` 가 원 논문 식을 우리 도메인으로 옮긴 것이다.
+
+```bash
+FRAUD_W_RULE=0.7
+FRAUD_W_ML=0.3      # 기본값은 0. 켜야 모델이 돈다
+```
+
+**기본값이 `w_ml=0` 인 이유**는 eBay 데이터로 학습해 우리 도메인에서 검증된 적이 없기
+때문이다. 피처 정의를 논문대로 옮겼지만 분포가 같다는 보장은 없다.
+
+### 두 트랙이 독립적으로 같은 결론에 닿는지 본다
+
+```
+핑퐁 입찰   member 21  rule 0.535  ml 0.538
+           member 22  rule 0.394  ml 0.457
+           member 23  rule 0.033  ml 0.006   ← 우연히 낀 일반 입찰자
+
+구독자 참여  member 31  rule 0.287  ml 0.290   ← 편중 100% 지만 구독 중
+```
+
+규칙 R4 와 모델 `Bidder_Tendency` 가 **둘 다 구독을 보므로** 단골 구매자는 양쪽에서
+낮게 나온다.
+
+### 실패해도 탐지가 멈추지 않는다
+
+| 상황 | 동작 |
+| --- | --- |
+| 모델 파일 없음 | 경고만 남기고 규칙 트랙으로 시작 |
+| 추론 중 예외 | 규칙 점수만 응답 |
+| 코퍼스 기준값 없음 | `ml_score = null` |
+
+**`ml_score` 를 0 으로 채우지 않는다.** 피처 두 개가 "평균 대비" 라서 0 은 "평균과 같다"
+는 뜻이 된다. 기준값을 모르는 것과 평균과 같은 것은 다르다.
+
+### 피처 순서는 모델이 정한다
+
+```
+학습   Bidder_Tendency, Bidding_Ratio, Last_Bidding, ...
+서빙   Bidding_Ratio, Last_Bidding, Auction_Bids, ...
+```
+
+만들면서 실제로 어긋나 있었다. **이름이 같아도 자리가 다르면 값이 뒤섞이는데, 예외 없이
+그럴듯한 점수가 나와서 알아채기 어렵다.** 그래서 순서를 하드코딩하지 않고
+`model_meta.json` 에서 읽고, 집합이 다르면 로드 시점에 실패시킨다.
 
 ## 서빙 계약
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from fraud import Auction, Bid, DetectionInput, HistoryEntry, Member
+from fraud import Auction, Bid, CorpusStats, DetectionInput, HistoryEntry, Member
 
 T0 = datetime(2026, 9, 8, 14, 0, 0)
 SELLER = 1000
@@ -57,16 +57,22 @@ def _members(ids: list[int], age_days: float = 365.0) -> dict[int, Member]:
     return {m: Member(member_id=m, created_at=T0 - timedelta(days=age_days)) for m in ids}
 
 
-def _history(sellers: list[int]) -> tuple[HistoryEntry, ...]:
+def _history(sellers: list[int], bidding_ratio: float = 0.3) -> tuple[HistoryEntry, ...]:
     return tuple(
         HistoryEntry(
             auction_id=9000 + i,
             seller_id=s,
             participated_at=T0 - timedelta(days=30 - i),
             won=False,
+            bidding_ratio=bidding_ratio,
         )
         for i, s in enumerate(sellers)
     )
+
+
+# ML 피처 두 개가 "평균 대비" 라서 비교 기준이 필요하다. 실제로는 같은 카테고리의
+# 종료된 경매에서 구하고, 여기서는 그럴듯한 값을 박아 둔다.
+DEMO_CORPUS = CorpusStats(category_id=1, mean_bids=18.0, mean_start_price=50_000.0)
 
 
 def _normal() -> DetectionInput:
@@ -79,6 +85,7 @@ def _normal() -> DetectionInput:
         members=_members(seq),
         histories={m: _history([OTHER_SELLER] * 4) for m in set(seq)},
         as_of=T0 + timedelta(seconds=DURATION_SEC),
+        corpus=DEMO_CORPUS,
     )
 
 
@@ -98,6 +105,7 @@ def _pingpong() -> DetectionInput:
         members=_members(seq),
         histories={21: concentrated, 22: concentrated, 23: diverse},
         as_of=T0 + timedelta(seconds=DURATION_SEC),
+        corpus=DEMO_CORPUS,
     )
 
 
@@ -116,6 +124,7 @@ def _subscriber() -> DetectionInput:
         histories={m: _history([SELLER] * 8) for m in set(seq)},
         as_of=T0 + timedelta(seconds=DURATION_SEC),
         subscriptions={m: frozenset({SELLER}) for m in set(seq)},
+        corpus=DEMO_CORPUS,
     )
 
 

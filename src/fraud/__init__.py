@@ -14,6 +14,7 @@
 from .config import RuleConfig, RuleSpec
 from .engine import combine, detect
 from .schema import (
+    CorpusStats,
     Auction,
     Bid,
     BidderResult,
@@ -25,6 +26,7 @@ from .schema import (
 )
 
 __all__ = [
+    "CorpusStats",
     "Auction",
     "Bid",
     "BidderResult",
