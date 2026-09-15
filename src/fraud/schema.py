@@ -68,6 +68,30 @@ class HistoryEntry:
     participated_at: datetime
     won: bool = False
 
+    # 그 경매에서 이 입찰자가 차지한 입찰 비중. Winning_Ratio 가 "적극 참여한 경매"
+    # 만 세기 때문에 필요하다 (원 논문 기준 0.1 초과). 없으면 소극 참여로 본다.
+    bidding_ratio: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class CorpusStats:
+    """코퍼스 전체에서 나오는 기준값. 경매 1건만 봐서는 계산할 수 없다.
+
+    ML 피처 두 개가 "평균보다 얼마나 높은가/낮은가" 라서 비교 대상이 필요하다.
+    같은 카테고리의 종료된 경매에서 구한다 — 카테고리마다 입찰 양도 가격대도
+    다르므로 전체 평균을 쓰면 비싼 카테고리가 통째로 이상하게 보인다.
+
+        SELECT AVG(bid_count), AVG(start_price)
+        FROM auction WHERE category_id = ? AND status = 'ENDED'
+
+    이 값이 없으면 ML 점수를 내지 않는다. 0 을 넣으면 "평균과 같다" 는 뜻이 되어
+    모델이 그 피처에서 아무 신호도 못 받는데, 그건 "판단하지 않음" 과 다르다.
+    """
+
+    category_id: int
+    mean_bids: float          # 경매당 평균 입찰 수
+    mean_start_price: float   # 평균 시작가
+
 
 @dataclass(frozen=True, slots=True)
 class DetectionInput:
@@ -80,6 +104,9 @@ class DetectionInput:
     # member_id -> 이 회원이 구독 중인 판매자(방송자) id 집합.
     # subscription 테이블에서 온다. 비어 있으면 구독 정보 없음으로 취급한다.
     subscriptions: Mapping[int, frozenset[int]] = field(default_factory=dict)
+
+    # ML 피처 계산에 필요한 카테고리 기준값. 없으면 규칙 점수만 낸다.
+    corpus: "CorpusStats | None" = None
 
     def is_subscribed(self, member_id: int, seller_id: int) -> bool:
         return seller_id in self.subscriptions.get(member_id, frozenset())

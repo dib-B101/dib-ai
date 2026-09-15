@@ -26,6 +26,8 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 
 from fraud import RuleConfig, combine, detect
+from fraud import ml_features
+from fraud_ml.predict import FraudModel, ModelNotAvailable
 
 from .demo import demo_data
 from .models import BidderRisk, DetectResponse, DetectRequest, HealthResponse
@@ -34,8 +36,10 @@ from .provider import InMemoryProvider, InputProvider, ProviderError
 log = logging.getLogger("fraud_api")
 
 # 규칙 점수와 모델 점수의 결합 비율.
-# 모델 트랙이 가동되기 전에는 규칙이 전부를 차지한다. eBay 데이터로 학습한 모델은
-# 우리 도메인에서 검증된 적이 없으므로, 가동하더라도 규칙 쪽에 더 무게를 둔다.
+#
+# **기본값은 규칙 100% 다.** 모델은 eBay 데이터로 학습해 우리 도메인에서 검증된 적이
+# 없다. 피처 정의를 논문대로 옮겼지만 분포가 같다는 보장은 없으므로, 우리 데이터로
+# 재학습하기 전까지는 낮게 두거나 0 으로 둔다.
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 
@@ -55,6 +59,17 @@ async def lifespan(app: FastAPI):
         cfg.version,
         len(cfg.enabled_rules),
     )
+
+    # 모델은 없어도 된다. 탐지는 규칙 트랙만으로 동작하고 모델은 얹히는 구조다.
+    # 여기서 죽으면 규칙 탐지까지 같이 멈추므로 경고만 남기고 계속 간다.
+    try:
+        _state["model"] = FraudModel.load()
+        model: FraudModel = _state["model"]  # type: ignore[assignment]
+        log.info("모델 준비 완료 — %s, w_ml=%.2f", model.version, W_ML)
+    except ModelNotAvailable as exc:
+        log.warning("모델 없이 시작합니다 (규칙 트랙만 동작) — %s", exc)
+        _state["model"] = None
+
     yield
     _state.clear()
 
@@ -130,25 +145,49 @@ def detect_auction(
         )
 
     result = detect(inp, cfg)
+    model: FraudModel | None = _state.get("model")  # type: ignore[assignment]
 
-    results = [
-        BidderRisk(
-            member_id=r.member_id,
-            risk_score=round(combine(r.rule_score, None, W_RULE, W_ML), 4),
-            rule_score=round(r.rule_score, 4),
-            ml_score=None,
-            band=cfg.band_of(r.rule_score),
-            reasons=r.reasons(),
-            detail={**r.to_detail(), "rule_config_version": result.rule_config_version},
+    # 모델 점수는 한 번에 계산한다. 입찰자마다 부르면 경매 하나에 수십 번이 된다.
+    # 코퍼스 기준값이 없으면 피처를 못 만들므로 None 이 되고, 그 경우 규칙 점수만 쓴다.
+    ml_scores: dict[int, float | None] = {r.member_id: None for r in result.results}
+    if model is not None and W_ML > 0:
+        rows = {
+            r.member_id: f
+            for r in result.results
+            if (f := ml_features.compute(inp, r.member_id)) is not None
+        }
+        if rows:
+            try:
+                for member_id, score in zip(rows, model.score_many(list(rows.values()))):
+                    ml_scores[member_id] = score
+            except Exception:
+                # 모델이 터져도 규칙 점수는 나가야 한다.
+                log.exception("모델 추론 실패 auction_id=%s", req.auction_id)
+
+    results = []
+    for r in result.results:
+        ml = ml_scores[r.member_id]
+        risk = combine(r.rule_score, ml, W_RULE, W_ML)
+        results.append(
+            BidderRisk(
+                member_id=r.member_id,
+                risk_score=round(risk, 4),
+                rule_score=round(r.rule_score, 4),
+                ml_score=round(ml, 4) if ml is not None else None,
+                band=cfg.band_of(risk),
+                reasons=r.reasons(),
+                detail={
+                    **r.to_detail(),
+                    "rule_config_version": result.rule_config_version,
+                },
+            )
         )
-        for r in result.results
-    ]
 
     return DetectResponse(
         auction_id=result.auction_id,
         as_of=result.as_of,
         rule_config_version=result.rule_config_version,
-        model_version=None,
+        model_version=model.version if model is not None and W_ML > 0 else None,
         weights={"w_rule": W_RULE, "w_ml": W_ML},
         results=results,
         skipped_bidders=dict(result.skipped_bidders),
