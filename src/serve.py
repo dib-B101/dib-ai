@@ -1,4 +1,4 @@
-"""이상거래 탐지와 상품 검수를 한 서버에 띄운다.
+"""이상거래 탐지 · 상품 검수 · 추천을 한 서버에 띄운다.
 
     python -m uvicorn serve:app --port 8000
 
@@ -19,6 +19,7 @@ from fastapi import FastAPI
 from envfile import load_env
 from fraud_api.main import lifespan as fraud_lifespan
 from fraud_api.main import router as fraud_router
+from internal_api.main import router as internal_router
 from moderation_api.main import lifespan as moderation_lifespan
 from moderation_api.main import router as moderation_router
 from reco_api.main import lifespan as reco_lifespan
@@ -55,3 +56,4 @@ app = FastAPI(
 app.include_router(fraud_router)
 app.include_router(moderation_router)
 app.include_router(reco_router)
+app.include_router(internal_router)

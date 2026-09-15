@@ -6,12 +6,14 @@ popularity.rank() 의 boost 인자로 끼워 넣는다 — 랭킹 코드를 다�
 """
 
 from .config import RecoConfig
+from .explain import reason_for
 from .popularity import percentile_ranks, rank, urgency
 from .schema import Candidate, ProductVector, RecoResult, Scored
 from .similarity import blend, cosine, similarities
 
 __all__ = [
     "RecoConfig",
+    "reason_for",
     "Candidate",
     "ProductVector",
     "RecoResult",
