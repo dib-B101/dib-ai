@@ -8,9 +8,9 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
-from reco import Candidate
+from reco import Candidate, ProductVector
 
 
 class ProviderError(RuntimeError):
@@ -22,17 +22,34 @@ class CandidateProvider(Protocol):
 
     def load_active(self, now: datetime, limit: int) -> Sequence[Candidate]: ...
 
+    def load_vectors(
+        self, auction_ids: Sequence[int]
+    ) -> Mapping[int, ProductVector]: ...
+
 
 class InMemoryProvider:
     """합성 데이터. `bid` 테이블 없이도 API 를 호출해 볼 수 있다."""
 
     name = "in-memory(demo)"
 
-    def __init__(self, candidates: Sequence[Candidate]) -> None:
+    def __init__(
+        self,
+        candidates: Sequence[Candidate],
+        vectors: Sequence[ProductVector] = (),
+    ) -> None:
         self._candidates = tuple(candidates)
+        self._vectors = {v.auction_id: v for v in vectors}
 
     def load_active(self, now: datetime, limit: int) -> Sequence[Candidate]:
         return self._candidates
+
+    def load_vectors(self, auction_ids: Sequence[int]) -> Mapping[int, ProductVector]:
+        """가진 것만 돌려준다. **없는 것을 0 벡터로 채우지 않는다.**
+
+        아직 임베딩 배치가 돌지 않은 상품은 "유사도를 모르는" 상태지, "안 닮은"
+        상태가 아니다. 호출자가 그 차이를 구분할 수 있어야 한다.
+        """
+        return {i: self._vectors[i] for i in auction_ids if i in self._vectors}
 
 
 class PostgresProvider:
@@ -62,6 +79,37 @@ class PostgresProvider:
         self._dsn = dsn
 
     def load_active(self, now: datetime, limit: int) -> Sequence[Candidate]:
+        raise ProviderError(
+            "PostgresProvider 는 아직 구현되지 않았습니다. DB 연결 후 채우세요."
+        )
+
+    def load_vectors(self, auction_ids: Sequence[int]) -> Mapping[int, ProductVector]:
+        """`product_embedding` 에서 벡터를 읽는다.
+
+            SELECT a.auction_id, e.text_embedding, e.image_embedding
+            FROM auction a
+            JOIN product_embedding e USING (product_id)
+            WHERE a.auction_id = ANY(:auction_ids)
+
+        **`JOIN` 이지 `LEFT JOIN` 이 아니다.** 벡터가 없는 상품은 행 자체가 빠져야
+        호출자가 "아직 임베딩 안 됨" 으로 처리할 수 있다. `LEFT JOIN` 으로 NULL 을
+        받으면 0 벡터로 채우고 싶은 유혹이 생기는데, 0 은 "안 닮음" 으로 읽힌다.
+
+        `image_embedding` 은 컬럼 자체가 NULL 일 수 있다 — 사진을 못 읽었거나
+        이미지 배치가 아직 안 돈 상품이다. 그대로 `ProductVector.image=None` 이다.
+
+        후보가 수만 건으로 늘면 이 방식(전체 로드 후 파이썬 계산)이 한계에 온다.
+        그때는 pgvector 인덱스로 DB 에서 상위 N 만 받아 오면 된다.
+
+            SELECT a.auction_id, e.text_embedding <=> :seed_vec AS distance
+            FROM auction a JOIN product_embedding e USING (product_id)
+            WHERE a.status = 'ACTIVE' AND a.auction_id <> :seed_id
+            ORDER BY e.text_embedding <=> :seed_vec
+            LIMIT :n
+
+        `<=>` 는 코사인 거리라 **작을수록 가깝다.** 유사도로 쓰려면 `1 - distance`
+        로 뒤집어야 한다. 부호를 그대로 두면 가장 안 닮은 상품이 1위가 된다.
+        """
         raise ProviderError(
             "PostgresProvider 는 아직 구현되지 않았습니다. DB 연결 후 채우세요."
         )

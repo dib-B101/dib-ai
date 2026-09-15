@@ -22,6 +22,8 @@ class RecoConfig:
     popularity: Mapping[str, float]
     competition: Mapping[str, float]
     weights: Mapping[str, float]
+    similarity_weight: float
+    similarity_text_weight: float
     limit: int
 
     @classmethod
@@ -35,6 +37,8 @@ class RecoConfig:
             popularity=dict(raw.get("popularity", {})),
             competition=dict(raw.get("competition", {})),
             weights=dict(raw.get("weights", {})),
+            similarity_weight=float(raw.get("similarity", {}).get("weight", 0.5)),
+            similarity_text_weight=float(raw.get("similarity", {}).get("text", 0.6)),
             limit=int(raw.get("limit", 50)),
         )
         cfg.validate()
@@ -45,6 +49,12 @@ class RecoConfig:
 
         가중치 오타 하나로 추천 순서가 조용히 망가지면 원인을 찾는 데 훨씬 오래 걸린다.
         """
+        for name, value in (
+            ("similarity.weight", self.similarity_weight),
+            ("similarity.text", self.similarity_text_weight),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} 는 0~1 이어야 합니다: {value}")
         if self.tau_seconds <= 0:
             raise ValueError(f"tau_seconds 는 양수여야 합니다: {self.tau_seconds}")
 

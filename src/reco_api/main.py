@@ -1,7 +1,8 @@
 """추천 API.
 
-    GET /internal/reco/home    홈 리스트 노출 순서
-    GET /reco/health           헬스체크
+    GET /internal/reco/home     홈 리스트 노출 순서
+    GET /internal/reco/similar  기준 상품과 닮은 경매
+    GET /reco/health            헬스체크
 
 **지금은 개인화가 없다.** 인기도와 마감 임박도만으로 순서를 만든다. 이것을 먼저 만드는
 이유는 세 곳에서 재사용되기 때문이다.
@@ -22,9 +23,9 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, status
 
 from envfile import load_env
-from reco import RecoConfig, rank
+from reco import RecoConfig, RecoResult, rank, similarities
 
-from .demo import demo_candidates
+from .demo import demo_candidates, demo_vectors
 from .models import RecoHealthResponse, RecoItem, RecoResponse
 from .provider import CandidateProvider, InMemoryProvider, ProviderError
 
@@ -42,7 +43,7 @@ def startup() -> None:
     load_env()
     cfg = RecoConfig.load()
     _state["config"] = cfg
-    _state["provider"] = InMemoryProvider(demo_candidates())
+    _state["provider"] = InMemoryProvider(demo_candidates(), demo_vectors())
     log.info("추천 준비 완료 — config=%s, 가중치 %s", cfg.version, dict(cfg.weights))
 
 
@@ -73,6 +74,32 @@ def get_provider() -> CandidateProvider:
             status.HTTP_503_SERVICE_UNAVAILABLE, "데이터 조회기가 준비되지 않았습니다"
         )
     return provider  # type: ignore[return-value]
+
+
+def _to_response(result: RecoResult) -> RecoResponse:
+    return RecoResponse(
+        as_of=result.as_of,
+        strategy=result.strategy,
+        config_version=result.config_version,
+        items=[
+            RecoItem(
+                rank=i,
+                auction_id=s.auction_id,
+                score=round(s.score, 4),
+                detail=s.breakdown(),
+            )
+            for i, s in enumerate(result.items, start=1)
+        ],
+        excluded=dict(result.excluded),
+    )
+
+
+def _load_active(provider: CandidateProvider, now):
+    try:
+        return provider.load_active(now, CANDIDATE_POOL)
+    except ProviderError as exc:
+        log.exception("후보 조회 실패")
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
 
 @router.get("/reco/health", response_model=RecoHealthResponse, tags=["ops"])
@@ -110,30 +137,71 @@ def home(
     걸러내지 않으면 끝난 경매가 목록 맨 위에 올라온다. 제외된 건수는 `excluded` 에 담긴다.
     """
     now = datetime.now(timezone.utc)
+    candidates = _load_active(provider, now)
+    return _to_response(rank(candidates, cfg, now, limit=limit))
+
+
+@router.get(
+    "/internal/reco/similar",
+    response_model=RecoResponse,
+    tags=["reco"],
+    summary="기준 상품과 닮은 경매",
+)
+def similar(
+    auction_id: int = Query(..., description="기준이 되는 경매. 사용자가 지금 보고 있는 상품"),
+    limit: int = Query(10, ge=1, le=100, description="돌려받을 개수"),
+    cfg: RecoConfig = Depends(get_config),
+    provider: CandidateProvider = Depends(get_provider),
+) -> RecoResponse:
+    """기준 상품과 닮은 진행 중 경매를 돌려준다.
+
+    유사도만으로 줄 세우지 않는다.
+
+        점수 = w × 유사도 + (1 − w) × (마감 임박도 · 인기도 · 경쟁도)
+
+    닮기만 하고 아무도 안 보는 경매를 위로 올리면 안 되기 때문이다. w 는
+    `config/reco.yaml` 의 `similarity.weight` 이며 기본 0.5 다.
+
+    **기준 상품 자신은 결과에서 빠진다.** 유사도 1 이라 반드시 1위가 되는데, 지금
+    보고 있는 상품을 "이런 상품은 어때요" 에 다시 띄우는 것은 사고다.
+
+    두 가지 경우에 결과가 달라진다.
+
+    **기준 상품의 임베딩이 없으면 인기순으로 폴백한다.** 응답의 `strategy` 가
+    `popularity` 로 온다. 추천을 아예 비워 보내는 것보다 낫다고 판단했다.
+
+    **임베딩이 없는 후보는 목록에서 빠진다.** 건수는 `excluded.no_vector` 에 담긴다.
+    유사도를 0 으로 채워 넣으면 "안 닮았다" 로 읽혀, 아직 배치가 안 돌았다는 이유만으로
+    순위가 밀린다. 모르는 것과 안 닮은 것은 다르다.
+    """
+    now = datetime.now(timezone.utc)
+    candidates = _load_active(provider, now)
 
     try:
-        candidates = provider.load_active(now, CANDIDATE_POOL)
+        vectors = provider.load_vectors([auction_id, *(c.auction_id for c in candidates)])
     except ProviderError as exc:
-        log.exception("후보 조회 실패")
+        log.exception("벡터 조회 실패 auction_id=%s", auction_id)
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
 
-    result = rank(candidates, cfg, now, limit=limit)
+    seed = vectors.get(auction_id)
+    if seed is None:
+        log.warning("기준 상품 임베딩 없음 auction_id=%s — 인기순으로 폴백", auction_id)
+        return _to_response(rank(candidates, cfg, now, limit=limit))
 
-    return RecoResponse(
-        as_of=result.as_of,
-        strategy=result.strategy,
-        config_version=result.config_version,
-        items=[
-            RecoItem(
-                rank=i,
-                auction_id=s.auction_id,
-                score=round(s.score, 4),
-                detail=s.breakdown(),
-            )
-            for i, s in enumerate(result.items, start=1)
-        ],
-        excluded=dict(result.excluded),
-    )
+    usable = [c for c in candidates if c.auction_id in vectors]
+    sims = similarities(seed, [vectors[c.auction_id] for c in usable], cfg.similarity_text_weight)
+
+    # 기준 상품 자신은 similarities() 가 빼므로 후보에서도 빼야 짝이 맞는다.
+    usable = [c for c in usable if c.auction_id != auction_id]
+
+    result = rank(usable, cfg, now, limit=limit, similarity=sims, strategy="similar")
+
+    # 종료 제외(`ended`)와 겹치지 않게 **벡터 유무만으로** 센다. 두 사유를 한 건에
+    # 이중으로 세면 백엔드가 합계를 맞춰 볼 때 숫자가 안 맞는다.
+    no_vector = sum(1 for c in candidates if c.auction_id not in vectors)
+    if no_vector:
+        result.excluded["no_vector"] = no_vector
+    return _to_response(result)
 
 
 app = FastAPI(

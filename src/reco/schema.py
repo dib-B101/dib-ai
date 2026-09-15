@@ -52,6 +52,7 @@ class Scored:
     popularity: float
     competition: float
     remaining_seconds: float
+    similarity: float = 0.0   # 유사 상품 추천일 때만. 인기순에서는 0
 
     def breakdown(self) -> dict[str, Any]:
         """왜 이 순위인지 설명하는 값들.
@@ -64,6 +65,7 @@ class Scored:
             "popularity": round(self.popularity, 4),
             "competition": round(self.competition, 4),
             "remaining_seconds": round(self.remaining_seconds, 1),
+            "similarity": round(self.similarity, 4),
         }
 
 
@@ -74,3 +76,21 @@ class RecoResult:
     strategy: str                     # popularity | personalized ...
     items: tuple[Scored, ...] = ()
     excluded: dict[str, int] = field(default_factory=dict)   # 사유 -> 건수
+
+
+@dataclass(frozen=True, slots=True)
+class ProductVector:
+    """상품 1건의 임베딩. `product_embedding` 테이블 한 행에 대응한다.
+
+    키가 `product_id` 가 아니라 `auction_id` 인 이유는 추천의 단위가 **진행 중인
+    경매**이기 때문이다. 유찰 후 재등록되면 같은 상품에 여러 경매가 붙는데,
+    벡터는 같아도 마감 시각과 인기 지표가 달라 서로 다른 후보로 다뤄야 한다.
+
+    `image` 는 없을 수 있다. 사진을 못 읽었거나 아직 배치가 돌지 않은 상품인데,
+    **0 벡터로 채우지 않는다** — 0 은 "닮지 않음" 으로 읽혀 사진이 없다는 이유만으로
+    순위가 밀린다. 없으면 없는 채로 두고 텍스트만으로 판단한다.
+    """
+
+    auction_id: int
+    text: tuple[float, ...]                    # BGE-M3 1024차원, L2 정규화됨
+    image: tuple[float, ...] | None = None     # SigLIP 768차원, L2 정규화됨

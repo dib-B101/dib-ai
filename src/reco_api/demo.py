@@ -9,13 +9,16 @@ DB 없이 랭킹이 어떻게 동작하는지 눈으로 확인하기 위한 데�
 
 마지막 것이 중요하다. 종료된 경매는 남은 시간이 0 이하라 마감 임박도가 최대가 되므로,
 걸러내지 않으면 **끝난 경매가 목록 맨 위에 올라온다.**
+
+아래쪽에는 유사 상품 추천용 합성 벡터도 함께 둔다.
 """
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 
-from reco import Candidate
+from reco import Candidate, ProductVector
 
 
 def demo_candidates(now: datetime | None = None) -> tuple[Candidate, ...]:
@@ -54,5 +57,64 @@ def demo_candidates(now: datetime | None = None) -> tuple[Candidate, ...]:
             auction_id=20005, product_id=5, seller_id=504, category_id=2,
             started_at=at(hours=-3), auction_time=9000, ended_at=at(minutes=-30),
             view_count=9800, bookmark_count=400, bid_count=77, bidder_count=25,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 유사 상품 추천용 합성 벡터
+#
+# **실제 임베딩이 아니다.** 진짜 벡터는 텍스트 1024차원(BGE-M3), 이미지 768차원
+# (SigLIP) 이고 `product_embedding` 테이블에서 온다. 여기서는 사람이 읽고 검증할 수
+# 있도록 축마다 뜻을 붙인 저차원 벡터를 손으로 만들었다.
+#
+# 목적은 "좋은 추천이 나온다" 를 보이는 것이 아니라 **배선이 맞는지** 보이는 것이다.
+# 같은 카테고리끼리 가까운 값을 주었으므로, 유사도가 제대로 흐르면 같은 카테고리가
+# 위로 올라온다. 안 올라오면 벡터가 아니라 코드가 틀린 것이다.
+# ---------------------------------------------------------------------------
+
+_TEXT_AXES = ("스마트폰", "노트북", "의류", "신발", "가구", "기타")
+_IMAGE_AXES = ("기기화면", "신발형태", "목재질감", "배경")
+
+
+def _unit(values: tuple[float, ...]) -> tuple[float, ...]:
+    """L2 정규화. 실제 파이프라인도 저장 전에 정규화한다."""
+    norm = math.sqrt(sum(v * v for v in values))
+    return tuple(v / norm for v in values) if norm else values
+
+
+def demo_vectors() -> tuple[ProductVector, ...]:
+    return (
+        # 아이폰. 20003 과 가깝고 나머지와는 멀다
+        ProductVector(
+            auction_id=20001,
+            text=_unit((0.95, 0.30, 0.0, 0.0, 0.0, 0.05)),
+            image=_unit((0.95, 0.0, 0.0, 0.30)),
+        ),
+        # 나이키 운동화. 20005 와 가깝다
+        ProductVector(
+            auction_id=20002,
+            text=_unit((0.0, 0.0, 0.35, 0.93, 0.0, 0.05)),
+            image=_unit((0.0, 0.96, 0.0, 0.25)),
+        ),
+        # 갤럭시. 같은 카테고리인 20001 과 가장 가깝다
+        ProductVector(
+            auction_id=20003,
+            text=_unit((0.90, 0.35, 0.0, 0.0, 0.0, 0.10)),
+            image=_unit((0.92, 0.0, 0.0, 0.35)),
+        ),
+        # 원목 책상. **이미지 벡터가 없다** — 사진을 못 읽었거나 배치가 아직 안 돈
+        # 상품이다. 0 으로 채우지 않고 없는 채로 둬서 텍스트만으로 판단되게 한다.
+        ProductVector(
+            auction_id=20004,
+            text=_unit((0.0, 0.10, 0.0, 0.0, 0.98, 0.10)),
+            image=None,
+        ),
+        # 아디다스 운동화. 이미 끝난 경매라 후보에서 빠지지만, 벡터는 남겨 두어
+        # "종료 제외가 유사도 계산보다 먼저" 인지 확인할 수 있게 한다
+        ProductVector(
+            auction_id=20005,
+            text=_unit((0.0, 0.0, 0.40, 0.90, 0.0, 0.05)),
+            image=_unit((0.0, 0.93, 0.10, 0.30)),
         ),
     )
