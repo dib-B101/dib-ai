@@ -9,14 +9,18 @@
 **무작위 기준선을 함께 낸다.** 카테고리가 5개면 아무렇게나 뽑아도 0.2 는 나온다.
 기준선 없이 "Precision@5 = 0.4" 만 보면 좋은 건지 나쁜 건지 알 수 없다.
 
-세 가지를 비교한다.
+다섯 가지를 비교한다.
 
     텍스트만          BGE-M3 유사도
     이미지만          SigLIP 유사도
-    가중합            0.6 × 텍스트 + 0.4 × 이미지
+    가중합            0.6 × 텍스트 + 0.4 × 이미지 — 원값 · 백분위 · 표준화 세 방식
 
-가중합은 **원값과 백분위 두 방식**을 모두 낸다. 두 유사도의 분포가 다르면 원값 가중합은
-가중치가 이름뿐인 값이 되는데, 그게 실제로 일어나는지 데이터로 확인하기 위해서다.
+두 유사도는 평균도 폭도 다르다. 그래서 합치기 전에 눈금을 맞춰야 하는데, **어떻게
+맞추느냐가 결과를 바꾼다.** 세 방식을 모두 내는 이유다.
+
+    원값      눈금을 안 맞춘다. 평균이 높은 쪽이 유리해진다
+    백분위    순서만 남긴다. "얼마나 더 닮았는가" 를 버린다
+    표준화    (값 − 평균) / 표준편차. 평균을 맞추면서 간격은 남긴다   ← 서빙에서 쓰는 방식
 
 입력 CSV::
 
@@ -92,7 +96,24 @@ def precision_at_k(sim, categories: list[str], k: int) -> tuple[float, list[floa
     return float(np.mean(scores)), scores
 
 
-def blend(text_sim, image_sim, w_text: float, has_image, use_percentile: bool):
+def rescale(values, mode: str):
+    """NaN 을 건드리지 않고 눈금만 바꾼다."""
+    import numpy as np
+
+    out = np.array(values, dtype="float64")
+    valid = ~np.isnan(out)
+    if mode == "raw" or valid.sum() < 2:
+        return out
+
+    if mode == "pct":
+        out[valid] = percentile_ranks(list(out[valid]))
+    elif mode == "z":
+        sd = out[valid].std()
+        out[valid] = (out[valid] - out[valid].mean()) / (sd if sd else 1.0)
+    return out
+
+
+def blend(text_sim, image_sim, w_text: float, has_image, mode: str):
     """두 유사도를 합친다. 이미지가 없는 상품은 텍스트만 쓴다."""
     import numpy as np
 
@@ -100,9 +121,7 @@ def blend(text_sim, image_sim, w_text: float, has_image, use_percentile: bool):
     out = np.zeros((n, n), dtype="float64")
 
     for i in range(n):
-        t_row = text_sim[i]
-        if use_percentile:
-            t_row = np.array(percentile_ranks(list(t_row)))
+        t_row = rescale(text_sim[i], mode)
 
         if image_sim is None or not has_image[i]:
             out[i] = t_row
@@ -110,13 +129,9 @@ def blend(text_sim, image_sim, w_text: float, has_image, use_percentile: bool):
 
         # 이미지가 있는 상품끼리만 이미지 유사도를 쓴다.
         # 없는 상품을 0 으로 채우면 "닮지 않음" 으로 오해되어 순위가 밀린다.
-        i_row = image_sim[i].copy()
+        i_row = image_sim[i].astype("float64").copy()
         i_row[~has_image] = np.nan
-        if use_percentile:
-            valid = ~np.isnan(i_row)
-            ranked = np.full(n, np.nan)
-            ranked[valid] = percentile_ranks(list(i_row[valid]))
-            i_row = ranked
+        i_row = rescale(i_row, mode)
 
         combined = w_text * t_row + (1 - w_text) * i_row
         out[i] = np.where(np.isnan(combined), t_row, combined)
@@ -197,23 +212,26 @@ def main() -> int:
     if image_sim is not None and has_image.sum() >= 2:
         report("이미지만", image_sim, categories, args.k, baseline, ceiling)
         w = args.text_weight
-        raw = report(
-            f"가중합 (원값 {w}/{1 - w:.1f})",
-            blend(text_sim, image_sim, w, has_image, False), categories, args.k, baseline, ceiling,
-        )
-        pct = report(
-            f"가중합 (백분위 {w}/{1 - w:.1f})",
-            blend(text_sim, image_sim, w, has_image, True), categories, args.k, baseline, ceiling,
-        )
+        scores = {
+            name: report(
+                f"가중합 ({name} {w}/{1 - w:.1f})",
+                blend(text_sim, image_sim, w, has_image, mode),
+                categories, args.k, baseline, ceiling,
+            )
+            for mode, name in (("raw", "원값"), ("pct", "백분위"), ("z", "표준화"))
+        }
 
         print()
-        best = max(text_score, raw, pct)
-        if pct >= best:
-            print("  → 백분위 가중합이 가장 낫습니다. 현재 설계대로 가면 됩니다.")
-        elif text_score >= best:
+        best_name = max(scores, key=lambda k: scores[k])
+        if max(scores.values()) <= text_score:
             print("  → 텍스트 단독이 가장 낫습니다. 이미지 비중을 낮추는 것을 검토하십시오.")
         else:
-            print("  → 원값 가중합이 더 낫습니다. 두 유사도의 분포가 비슷하다는 뜻입니다.")
+            print(f"  → 이미지를 섞는 것이 텍스트 단독보다 낫습니다 "
+                  f"({text_score:.3f} → {max(scores.values()):.3f}).")
+            print(f"    눈금 맞추는 방식은 '{best_name}' 이 가장 좋습니다. "
+                  f"서빙은 '표준화' 를 씁니다({scores['표준화']:.3f}).")
+            if best_name != "표준화":
+                print(f"    차이가 0.01 을 넘으면 src/reco/similarity.py 의 blend() 를 재검토하십시오.")
 
     print()
     print("=" * 78)
