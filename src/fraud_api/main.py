@@ -31,7 +31,7 @@ from fraud_ml.predict import FraudModel, ModelNotAvailable
 
 from .demo import demo_data
 from .models import BidderRisk, DetectResponse, DetectRequest, HealthResponse
-from .provider import InMemoryProvider, InputProvider, ProviderError
+from .provider import InMemoryProvider, InputProvider, PostgresProvider, ProviderError
 
 log = logging.getLogger("fraud_api")
 
@@ -43,6 +43,22 @@ log = logging.getLogger("fraud_api")
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 
+# DB 가 설정되어 있으면 실제 조회를, 아니면 합성 데이터를 쓴다.
+#
+# **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
+# 판정은 데모 경매 3건만 아는 상태가 되어, 실제 경매를 물어보면 "없는 경매" 로
+# 답한다. 조용히 틀리느니 뜨지 않는 편이 낫다.
+DATABASE_URL = os.getenv("DIB_DATABASE_URL", "").strip()
+
+
+def _make_provider() -> InputProvider:
+    if not DATABASE_URL:
+        log.warning("DIB_DATABASE_URL 이 없어 합성 데이터로 동작합니다 (데모 경매 3건)")
+        return InMemoryProvider(demo_data())
+    log.info("실제 DB 에 연결합니다")
+    return PostgresProvider(DATABASE_URL)
+
+
 # 라우터로 분리해 두면 검수 API 와 한 서버에 합쳐 띄울 수 있다 (src/serve.py).
 router = APIRouter()
 
@@ -52,7 +68,7 @@ _state: dict[str, object] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["config"] = RuleConfig.load()
-    _state["provider"] = InMemoryProvider(demo_data())
+    _state["provider"] = _make_provider()
     cfg: RuleConfig = _state["config"]  # type: ignore[assignment]
     log.info(
         "규칙 엔진 준비 완료 — config=%s, 활성 규칙 %d개",
