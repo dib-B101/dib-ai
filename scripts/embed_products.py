@@ -16,13 +16,25 @@
 이미 채워진 상품은 건너뛴다. 중간에 죽어도 그 다음에 이어서 하면 된다. 한 묶음씩
 커밋하므로 **앞서 끝낸 작업이 날아가지 않는다.**
 
-## 지금은 "언제 다시 계산할지" 를 모른다
+## 수정된 상품을 어떻게 알아내나
 
-상품 설명이 수정되어도 알 수 없다. `embedded_at` · `embedding_model` 컬럼이 없어서,
-어느 행이 낡았는지 판단할 근거가 DB 에 없기 때문이다. 지금은 **비어 있는 것만**
-채우고, 모델을 바꾸면 `--all` 로 전부 다시 돌린다.
+`embedded_at` 컬럼이 없어도 알 수 있다. 근거는 백엔드 구현에 있다 — **상품을
+수정하면 반드시 `status` 가 `PENDING` 으로 돌아간다.** 재검수를 거쳐야 하기 때문이다.
 
-상품이 수천 건을 넘으면 그 두 컬럼을 요청하는 편이 낫다.
+    수정 → PENDING → 배치가 벡터를 비움 → 재검수 통과 → 배치가 새로 계산
+
+그래서 실행할 때마다 먼저 **`PENDING` · `REJECTED` · 삭제된 상품의 벡터를 비운다.**
+`NULL` 이 곧 "다시 계산해야 함" 이 되므로 따로 기록할 것이 없다. 거부·삭제된 상품의
+벡터를 남겨 두지 않는 효과도 같이 얻는다 — 남아 있으면 노출 정책이 바뀔 때 조용히
+추천에 섞여 들어간다.
+
+비운 상품을 같은 실행에서 다시 계산하지는 않는다. `PENDING` 은 계산 대상이 아니다.
+
+## 남은 한계 — 모델을 바꿨을 때
+
+어느 행이 어떤 모델로 계산됐는지는 DB 에 없다. 모델이나 텍스트 구성을 바꾸면
+`--all` 로 전부 다시 돌리는 수밖에 없다. 드물고 의도적인 작업이라 지금은 이걸로
+충분하지만, 상품이 수천 건을 넘으면 `embedding_model` 컬럼을 요청하는 편이 낫다.
 """
 
 from __future__ import annotations
@@ -60,6 +72,19 @@ def fetch_pending(conn, limit: int, force: bool):
             },
         )
         return store.to_pending(cur.fetchall())
+
+
+def reclaim_stale(conn) -> int:
+    """낡았거나 남아 있으면 안 되는 벡터를 비운다. 비운 건수를 돌려준다.
+
+    상품을 수정하면 백엔드가 `status` 를 `PENDING` 으로 되돌린다. 그 사실이
+    **`embedded_at` 컬럼 없이 재계산 시점을 알아내는 근거**다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(store.RECLAIM_SQL, {"skip_status": list(store.SKIP_PRODUCT_STATUS)})
+        wiped = cur.rowcount
+    conn.commit()
+    return max(wiped, 0)
 
 
 def report_counts(conn) -> tuple[int, int]:
@@ -112,6 +137,11 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=0, help="이번 실행에서 처리할 최대 건수 (0=전부)")
     ap.add_argument("--all", action="store_true", help="이미 채워진 것도 다시 계산한다")
     ap.add_argument("--dry-run", action="store_true", help="계산만 하고 DB 에 쓰지 않는다")
+    ap.add_argument(
+        "--no-reclaim",
+        action="store_true",
+        help="수정·거부·삭제된 상품의 낡은 벡터를 비우는 단계를 건너뛴다",
+    )
     args = ap.parse_args()
 
     load_env()
@@ -127,6 +157,11 @@ def main() -> int:
 
     conn = connect(dsn)
     try:
+        if not (args.dry_run or args.no_reclaim):
+            wiped = reclaim_stale(conn)
+            if wiped:
+                print(f"낡은 벡터    {wiped:,}건 비움 (수정·거부·삭제된 상품)")
+
         pending, total = report_counts(conn)
         print(f"device      {resolve_device()}")
         print(f"대상 상품    {total:,}건 중 임베딩 없음 {pending:,}건")

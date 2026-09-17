@@ -128,3 +128,46 @@ def test_update_touches_only_the_vector_columns():
         "text_embedding  = %(text)s::vector",
         "image_embedding = %(image)s::vector",
     }
+
+
+# --- 낡은 벡터 회수 ---------------------------------------------------------
+
+
+def test_reclaim_targets_products_that_went_back_to_pending():
+    """`embedded_at` 컬럼 없이 재계산 시점을 알아내는 근거.
+
+    백엔드는 상품을 수정하면 반드시 `status` 를 `PENDING` 으로 되돌린다
+    (`ProductCommandServiceImpl:129`). 재검수를 거쳐야 하기 때문이다. 그래서
+    **`PENDING` 이면 내용이 바뀌었다는 뜻**이고, 벡터를 비우면 재검수 통과 후
+    배치가 알아서 다시 계산한다.
+    """
+    sql = store.RECLAIM_SQL
+
+    assert "status = ANY(%(skip_status)s)" in sql
+    assert "text_embedding IS NOT NULL" in sql, "이미 비어 있으면 건드릴 필요가 없다"
+
+
+def test_reclaim_also_clears_deleted_and_rejected():
+    """남겨 두면 노출 정책이 바뀔 때 조용히 추천에 섞여 들어간다."""
+    assert "deleted_at IS NOT NULL" in store.RECLAIM_SQL
+    assert "REJECTED" in store.SKIP_PRODUCT_STATUS
+
+
+def test_reclaim_wipes_both_columns():
+    """텍스트만 비우면 이미지 벡터가 낡은 채 남아 유사도를 오염시킨다."""
+    body = store.RECLAIM_SQL[
+        store.RECLAIM_SQL.index("SET") : store.RECLAIM_SQL.index("WHERE")
+    ]
+
+    assert "text_embedding  = NULL" in body
+    assert "image_embedding = NULL" in body
+
+
+def test_reclaimed_rows_are_not_recomputed_in_the_same_run():
+    """비운 상품을 곧바로 다시 계산하면 무한 반복이 된다.
+
+    `PENDING` · `REJECTED` 가 계산 대상에서 빠지므로 그런 일이 없다.
+    두 SQL 이 같은 목록을 쓰는지 확인한다.
+    """
+    assert "%(skip_status)s" in store.RECLAIM_SQL
+    assert "%(skip_status)s" in store.PENDING_SQL

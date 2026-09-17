@@ -62,6 +62,27 @@ SET text_embedding  = %(text)s::vector,
 WHERE product_id = %(product_id)s
 """
 
+# 낡았거나 남아 있으면 안 되는 벡터를 비운다.
+#
+# **`NULL` 이 곧 "다시 계산해야 함" 이다.** 별도의 `embedded_at` 컬럼 없이 재계산
+# 시점을 알아내는 방법이며, 근거는 백엔드 구현에 있다 — 상품을 수정하면 반드시
+# `status` 가 `PENDING` 으로 돌아간다 (재검수를 거쳐야 하므로).
+#
+#     수정 → PENDING → 여기서 벡터를 비움 → 재검수 통과 → 배치가 새로 계산
+#
+# 거부(`REJECTED`)와 삭제된 상품의 벡터도 함께 지운다. 남겨 둘 이유가 없고, 남아
+# 있으면 노출 정책이 바뀔 때 조용히 추천에 섞여 들어간다.
+#
+# 비운 상품을 같은 실행에서 다시 계산하지는 않는다 — `PENDING` · `REJECTED` 는
+# 계산 대상에서 빠지기 때문이다.
+RECLAIM_SQL = """
+UPDATE product
+SET text_embedding  = NULL,
+    image_embedding = NULL
+WHERE text_embedding IS NOT NULL
+  AND (status = ANY(%(skip_status)s) OR deleted_at IS NOT NULL)
+"""
+
 COUNT_SQL = """
 SELECT COUNT(*) FILTER (WHERE text_embedding IS NULL) AS pending,
        COUNT(*)                                       AS total
