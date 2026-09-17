@@ -356,3 +356,83 @@ def test_behavior_window_is_accepted_but_unused(client, sent):
     post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-r3", behaviorWindow={"days": 7}))
 
     assert json.loads(sent[0]["body"])["items"] == json.loads(sent[1]["body"])["items"]
+
+
+def test_backend_utc_timestamps_do_not_shift_the_features(client, sent):
+    """백엔드는 DB 의 naive TIMESTAMP 를 UTC 문자열로 바꿔 보낸다.
+
+    조회기의 경매 시각은 naive 다. 변환 없이 tzinfo 만 떼면 입찰이 경매 시작보다
+    몇 시간 앞으로 계산되고, **모든 입찰자의 Early_Bidding·Last_Bidding 이
+    1.0(최대 위험)이 된다.** 예외도 로그도 없어 눈으로는 안 잡힌다.
+
+    데모 경매는 14:00:00 에 시작한다(naive). 같은 순간을 UTC 로 표현해 보낸다.
+    """
+    import os
+    from datetime import datetime, timedelta
+
+    os.environ["DIB_DB_TIMEZONE"] = "Asia/Seoul"
+    try:
+        start_kst = datetime(2026, 9, 8, 14, 0, 0)   # demo 경매의 시작 시각(naive)
+        plan = ((20, 21), (40, 22), (70, 23), (110, 21))   # 게이트: 4건 · 3명
+        bids = [
+            {
+                "bidId": i,
+                "memberId": member,
+                "amount": 10_000 + i * 1_000,
+                # KST 14:00:20 을 백엔드는 UTC 05:00:20Z 로 보낸다
+                "createdAt": (start_kst + timedelta(seconds=off) - timedelta(hours=9))
+                .isoformat() + "Z",
+            }
+            for i, (off, member) in enumerate(plan, start=1)
+        ]
+        post_signed(client, BID_ANOMALIES, bid_request(jobId="job-utc", bids=bids))
+    finally:
+        os.environ.pop("DIB_DB_TIMEZONE", None)
+
+    features = json.loads(sent[0]["body"])["features"]
+
+    assert features["earlyBidding"] < 1.0, "9시간 밀리면 1.0 이 된다"
+    assert features["lastBidding"] < 1.0
+
+
+def test_failed_callback_lets_the_backend_retry(client, monkeypatch):
+    """콜백을 못 보냈으면 접수 기록을 지운다.
+
+    **안 그러면 백엔드의 재시도가 무력해진다.** 백엔드는 같은 jobId
+    (`bid-anomaly-{auctionId}-{memberId}`) 로 다시 보내는데, 우리가 "이미 접수함"
+    으로 202 만 주고 아무것도 안 하면 결과가 영영 가지 않는다.
+    """
+    attempts: list[bytes] = []
+    alive = {"ok": False}
+
+    def flaky(url, *, content, headers, timeout):
+        attempts.append(content)
+        code = 200 if alive["ok"] else 500
+        return httpx.Response(code, request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx, "post", flaky)
+    monkeypatch.setattr("internal_api.callback.MAX_ATTEMPTS", 1)
+
+    post_signed(client, BID_ANOMALIES, bid_request())
+    assert len(attempts) == 1, "한 번 시도하고 실패했다"
+
+    alive["ok"] = True
+    post_signed(client, BID_ANOMALIES, bid_request())
+
+    assert len(attempts) == 2, "재시도가 실제로 분석을 다시 돌려야 한다"
+
+
+def test_successful_callback_still_blocks_a_retry(client, sent):
+    """성공한 뒤의 재시도는 막는다. 같은 결과를 두 번 보낼 이유가 없다."""
+    post_signed(client, BID_ANOMALIES, bid_request())
+    post_signed(client, BID_ANOMALIES, bid_request())
+
+    assert len(sent) == 1
+
+
+def test_gated_bidder_is_not_retried(client, sent):
+    """보낼 값이 없는 것은 실패가 아니다. 재시도해도 결과는 같다."""
+    post_signed(client, BID_ANOMALIES, bid_request(memberId=999_999))
+    post_signed(client, BID_ANOMALIES, bid_request(memberId=999_999))
+
+    assert sent == []

@@ -36,6 +36,7 @@ from fraud import RuleConfig
 from fraud.schema import Bid
 from fraud.ml_features import FEATURE_VERSION
 from fraud_api import main as fraud_app
+from fraud_api import queries as fraud_queries
 from fraud_api.provider import ProviderError as FraudProviderError
 from reco import RecoConfig, rank, reason_for
 from reco_api import main as reco_app
@@ -73,6 +74,16 @@ def _accept(job_id: str) -> bool:
         _seen_jobs.clear()  # 무한정 쌓이게 두지 않는다. 최악이라도 재분석일 뿐이다
     _seen_jobs.add(job_id)
     return True
+
+
+def _release(job_id: str) -> None:
+    """결과를 못 보냈으면 접수 기록을 지운다.
+
+    **이걸 안 하면 백엔드의 재시도가 무력해진다.** 백엔드는 같은 jobId 로 다시
+    보내는데, 우리가 "이미 접수함" 으로 202 만 주고 아무것도 안 하면 결과가 영영
+    가지 않는다. 분석은 같은 입력에 같은 답을 내므로 다시 해도 안전하다.
+    """
+    _seen_jobs.discard(job_id)
 
 
 async def _verified_body(request: Request) -> bytes:
@@ -119,18 +130,17 @@ def _apply_payload_bids(inp, req: "BidAnomalyRequest"):
     추려내고 `members` 는 "가입 기록이 있는가" 표시에만 쓰므로, 본문에만 있는
     입찰자는 기록 없음으로 처리되어 조용히 틀리지 않는다.
 
-    시간대를 경매 쪽에 맞춘다. 한쪽만 tz 를 달고 있으면 비교할 때 TypeError 가 나고,
-    그 예외는 콜백이 안 나가는 형태로만 드러나 원인을 찾기 어렵다.
+    시각은 경매 쪽 시간대로 **변환한다.** 백엔드는 DB 의 naive `TIMESTAMP` 를
+    `Instant` 로 바꿔 UTC 로 보내는데 우리는 `started_at` 을 naive 로 읽으므로,
+    tzinfo 만 떼면 입찰이 경매 시작보다 몇 시간 앞으로 계산된다. 그러면 모든
+    입찰자의 `Early_Bidding` 과 `Last_Bidding` 이 1.0(최대 위험)이 되는데,
+    예외도 로그도 나지 않는다.
     """
     if not req.bids:
         return inp
 
-    aware = inp.auction.started_at.tzinfo is not None
-
     def at(moment):
-        if aware:
-            return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
-        return moment.replace(tzinfo=None) if moment.tzinfo else moment
+        return fraud_queries.align_to(moment, inp.auction.started_at)
 
     bids = tuple(
         Bid(
@@ -208,6 +218,8 @@ def _run_bid_anomaly(req: BidAnomalyRequest, inp, cfg: RuleConfig) -> None:
             # 게이트에 걸려 판정하지 않은 입찰자다. **0 점으로 보내지 않는다** —
             # "판단하지 않음" 을 "위험하지 않음" 으로 저장하면 신규 사용자일수록
             # 안전해 보이는 왜곡이 생긴다.
+            # 보낼 값이 없는 것은 실패가 아니다. 재시도해도 결과는 같으므로
+            # 접수 기록을 유지해 백엔드가 같은 분석을 반복하지 않게 한다.
             log.info(
                 "판정 대상이 아닙니다 job_id=%s member_id=%s 사유=%s",
                 req.job_id,
@@ -247,13 +259,15 @@ def _run_bid_anomaly(req: BidAnomalyRequest, inp, cfg: RuleConfig) -> None:
             ),
             feature_version=FEATURE_VERSION,
         )
-        callback.send(
+        if not callback.send(
             req.callback_url,
             payload.model_dump(by_alias=True),
             label=f"이상입찰 job_id={req.job_id}",
-        )
+        ):
+            _release(req.job_id)
     except Exception:
         log.exception("이상 입찰 분석 실패 job_id=%s", req.job_id)
+        _release(req.job_id)
 
 
 # --- 94 · 95 추천 -----------------------------------------------------------
@@ -298,6 +312,7 @@ def _run_recommendation(req: RecommendationRequest, cfg: RecoConfig, provider) -
             candidates = provider.load_active(now, reco_app.CANDIDATE_POOL)
         except RecoProviderError:
             log.exception("후보 조회 실패 job_id=%s", req.job_id)
+            _release(req.job_id)
             return
 
         # 후보를 지정해 왔으면 그 안에서만 고른다. 백엔드가 이미 노출 정책으로
@@ -319,13 +334,15 @@ def _run_recommendation(req: RecommendationRequest, cfg: RecoConfig, provider) -
                 for s in result.items
             ],
         )
-        callback.send(
+        if not callback.send(
             req.callback_url,
             payload.model_dump(by_alias=True),
             label=f"추천 job_id={req.job_id}",
-        )
+        ):
+            _release(req.job_id)
     except Exception:
         log.exception("추천 생성 실패 job_id=%s", req.job_id)
+        _release(req.job_id)
 
 
 @asynccontextmanager

@@ -133,24 +133,48 @@ def test_as_of_defaults_to_end_time():
     assert queries.resolve_as_of(None, a) == AS_OF
 
 
-def test_aware_request_is_stripped_for_naive_auction():
-    """ERD 의 TIMESTAMP 에는 시간대가 없다. 섞으면 비교할 때 TypeError 가 난다."""
+def test_aware_time_is_converted_not_stripped(monkeypatch):
+    """**tzinfo 만 떼면 안 된다. 시각을 옮겨야 한다.**
+
+    백엔드는 DB 의 naive TIMESTAMP 를 Instant 로 바꿔 UTC 로 보낸다. KST 14:00 이
+    05:00Z 로 오는데, 여기서 tzinfo 만 떼면 05:00 이 되어 9시간이 밀린다. 그러면
+    모든 입찰이 경매 시작 이전으로 계산되고 Early_Bidding·Last_Bidding 이 1.0
+    (최대 위험)이 된다 — 예외도 로그도 없이.
+    """
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
+    naive_kst = datetime(2026, 9, 8, 14, 0, 0)          # DB 에서 읽은 값
+    wire = datetime(2026, 9, 8, 5, 0, 0, tzinfo=timezone.utc)  # 같은 순간, 백엔드 표현
+
+    assert queries.align_to(wire, naive_kst) == naive_kst
+
+
+def test_naive_time_is_localised_for_aware_reference(monkeypatch):
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
+    aware_utc = datetime(2026, 9, 8, 5, 0, 0, tzinfo=timezone.utc)
+
+    aligned = queries.align_to(datetime(2026, 9, 8, 14, 0, 0), aware_utc)
+
+    assert aligned == aware_utc
+
+
+def test_align_is_a_no_op_when_kinds_already_match():
+    naive = datetime(2026, 9, 8, 14, 0, 0)
+    assert queries.align_to(naive, T0) == naive
+
+    aware = datetime(2026, 9, 8, 5, 0, 0, tzinfo=timezone.utc)
+    assert queries.align_to(aware, aware) == aware
+
+
+def test_as_of_is_aligned_to_the_auction(monkeypatch):
+    """요청의 as_of 는 tz 를 달고 오고 경매는 naive 다. 섞이면 TypeError 가 난다."""
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
     a = queries.to_auction(auction_row())
-    requested = datetime(2026, 9, 8, 14, 2, 0, tzinfo=timezone.utc)
+    requested = datetime(2026, 9, 8, 5, 2, 0, tzinfo=timezone.utc)  # KST 14:02
 
     resolved = queries.resolve_as_of(requested, a)
 
     assert resolved.tzinfo is None
-    assert resolved.hour == 14 and resolved.minute == 2
-    assert resolved > a.started_at, "비교가 되어야 한다"
-
-
-def test_naive_request_is_localised_for_aware_auction():
-    a = queries.to_auction(auction_row(started_at=T0.replace(tzinfo=timezone.utc)))
-
-    resolved = queries.resolve_as_of(datetime(2026, 9, 8, 14, 2, 0), a)
-
-    assert resolved.tzinfo is not None
+    assert (resolved.hour, resolved.minute) == (14, 2)
     assert resolved > a.started_at
 
 

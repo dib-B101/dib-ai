@@ -24,7 +24,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+import os
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Mapping, Sequence
 
 from fraud import Auction, Bid, CorpusStats, HistoryEntry, Member
@@ -219,17 +221,46 @@ def to_corpus(row: Mapping[str, Any] | None, category_id: int) -> CorpusStats | 
     )
 
 
+def db_timezone():
+    """DB 의 naive `TIMESTAMP` 가 어느 지역 시각인지.
+
+    `DIB_DB_TIMEZONE` 으로 지정하고, 없으면 이 서버의 지역 시각으로 본다. 백엔드가
+    `ZoneId.systemDefault()` 로 UTC 문자열을 만들므로 **AI 서버와 백엔드가 같은
+    시간대에서 돌면 기본값으로 맞는다.** 컨테이너를 UTC 로 띄우는 등 둘이 어긋나면
+    이 값을 명시해야 한다.
+    """
+    name = (os.getenv("DIB_DB_TIMEZONE") or "").strip()
+    return ZoneInfo(name) if name else None
+
+
+def align_to(moment: datetime, reference: datetime) -> datetime:
+    """`moment` 를 `reference` 와 같은 tz 종류로 **변환한다.**
+
+    **tzinfo 를 떼거나 붙이는 것이 아니라 시각을 옮긴다.** 백엔드는 DB 의 naive
+    `TIMESTAMP` 를 `Instant` 로 바꿔 `2026-09-08T05:00:20Z` 처럼 UTC 로 보내는데,
+    우리는 같은 경매의 `started_at` 을 naive(`14:00:00`) 로 읽는다. tzinfo 만 떼면
+    입찰이 경매 시작 9시간 전으로 계산되어 **모든 입찰자의 `Early_Bidding` 과
+    `Last_Bidding` 이 1.0(최대 위험)이 된다.** 예외도 로그도 나지 않는다.
+    """
+    zone = db_timezone()
+
+    if reference.tzinfo is not None:
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=zone) if zone else moment.astimezone()
+        return moment.astimezone(reference.tzinfo)
+
+    if moment.tzinfo is None:
+        return moment
+    if zone:
+        return moment.astimezone(zone).replace(tzinfo=None)
+    return moment.astimezone().replace(tzinfo=None)
+
+
 def resolve_as_of(requested: datetime | None, auction: Auction) -> datetime:
-    """기준 시각을 정하고 경매 시각과 tz 종류를 맞춘다.
+    """기준 시각을 정하고 경매 시각에 맞춘다.
 
     ERD 의 `TIMESTAMP` 에는 시간대가 없어 드라이버가 naive 로 준다. 요청에 실려 온
     `as_of` 는 보통 tz 를 달고 오므로, 섞으면 비교할 때 TypeError 가 난다.
     """
     base = requested or auction.ended_at or datetime.now()
-    aware = auction.started_at.tzinfo is not None
-
-    if aware and base.tzinfo is None:
-        return base.replace(tzinfo=auction.started_at.tzinfo)
-    if not aware and base.tzinfo is not None:
-        return base.replace(tzinfo=None)
-    return base
+    return align_to(base, auction.started_at)
