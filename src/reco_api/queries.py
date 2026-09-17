@@ -18,6 +18,12 @@
 `REGISTERED` 만 남기면 안 된다 — 경매가 걸린 상품은 `ON_AUCTION` 으로 바뀌므로
 그렇게 거르면 후보가 통째로 사라진다. 통과하지 못한 상태를 빼는 방식으로 쓴다.
 
+## 시각은 경계에서 UTC 로 올린다
+
+ERD 의 `TIMESTAMP` 에는 시간대가 없어 드라이버가 naive 로 준다. 랭킹은
+`datetime.now(timezone.utc)` 와 비교하므로, 변환하지 않으면 그대로 터진다.
+어느 지역 시각으로 해석할지는 `DIB_DB_TIMEZONE` 이 정한다 (`src/dbtime.py`).
+
 ## 판매자와 카테고리는 `product` 에 있다
 
 `auction` 에는 `member_id` 도 `category_id` 도 없다. 둘 다 `product` 를 조인해야
@@ -28,6 +34,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from dbtime import to_utc
 from reco import Candidate, ProductVector
 
 # 검수를 통과하지 못한 상품 상태. 이 목록에 있으면 추천에 노출하지 않는다.
@@ -85,9 +92,12 @@ def to_candidates(rows: Sequence[Mapping[str, Any]]) -> tuple[Candidate, ...]:
             product_id=r["product_id"],
             seller_id=r["seller_id"],
             category_id=r["category_id"],
-            started_at=r["started_at"],
+            # **DB 시각을 UTC 로 올린다.** 랭킹은 `datetime.now(timezone.utc)` 와
+            # 비교하는데, ERD 의 TIMESTAMP 에는 시간대가 없어 그대로 두면
+            # "can't subtract offset-naive and offset-aware datetimes" 로 터진다.
+            started_at=to_utc(r["started_at"]),
             auction_time=int(r["auction_time"]),
-            ended_at=r["ended_at"],
+            ended_at=to_utc(r["ended_at"]),
             live_broadcast_id=r["live_broadcast_id"],
             view_count=int(r["view_count"] or 0),
             bookmark_count=int(r["bookmark_count"] or 0),

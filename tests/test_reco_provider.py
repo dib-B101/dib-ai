@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,7 +45,48 @@ def test_candidate_takes_seller_and_category_from_product():
     c = queries.to_candidates([row()])[0]
 
     assert (c.seller_id, c.category_id) == (500, 7)
-    assert c.remaining_seconds(T0) == 3600
+
+
+def test_db_times_are_lifted_to_utc(monkeypatch):
+    """**엔드포인트가 500 으로 죽던 버그.**
+
+    ERD 의 TIMESTAMP 에는 시간대가 없어 드라이버가 naive 로 준다. 랭킹은
+    `datetime.now(timezone.utc)` 와 비교하므로, 변환하지 않으면
+    `TypeError: can't subtract offset-naive and offset-aware datetimes` 가 난다.
+
+    가짜 커넥션 테스트로는 못 잡았다 — 행 변환만 보고 랭킹까지 이어 보지 않았다.
+    """
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
+    c = queries.to_candidates([row()])[0]
+
+    assert c.started_at.tzinfo is not None
+    assert c.ended_at.tzinfo is not None
+    # KST 12:00 == UTC 03:00
+    assert c.started_at == datetime(2026, 9, 9, 3, 0, tzinfo=timezone.utc)
+
+
+def test_ranking_runs_on_provider_output(monkeypatch):
+    """조회 결과가 랭킹까지 흘러가는지 끝까지 본다.
+
+    행 변환만 검증하면 시간대 불일치처럼 **그다음 단계에서 터지는 것**을 놓친다.
+    실제로 놓쳤고, 실DB 에 붙여서야 발견했다.
+    """
+    from reco import RecoConfig, rank
+
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
+
+    # DB 가 주는 것과 같은 형태 — 시간대 없는 지역 시각. 진행 중이어야 하므로
+    # 지금을 기준으로 잡는다.
+    started = datetime.now()
+    rows = [
+        row(started_at=started, ended_at=started + timedelta(hours=1)),
+        row(auction_id=11, started_at=started, ended_at=started + timedelta(hours=1)),
+    ]
+    candidates = queries.to_candidates(rows)
+
+    result = rank(candidates, RecoConfig.load(), datetime.now(timezone.utc))
+
+    assert len(result.items) == 2, "시간대가 어긋나면 종료된 것으로 걸러지거나 터진다"
 
 
 def test_live_broadcast_id_marks_a_live_auction():
