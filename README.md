@@ -22,6 +22,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 백엔드 연동 (명세 92~95) | 구현 완료, HMAC 규약 합의 대기 | `src/internal_api/` |
 | 탐지 — 실DB 조회 | 구현 완료, 접속 정보 대기 | `src/fraud_api/queries.py` |
 | 추천 — 실DB 조회 | 후보 완료 · 벡터는 컬럼 분리 대기 | `src/reco_api/queries.py` |
+| 임베딩 배치 | 구현 완료, 컬럼 분리 대기 | `scripts/embed_products.py` |
 | 추천 — 개인화 (STEP 5~) | 미착수 | TBD |
 
 ## 폴더 구조
@@ -97,11 +98,13 @@ dib-ai/
 │   ├── test_internal_api.py  명세 92~95 계약 검증
 │   ├── test_fraud_provider.py  실DB 조회 · 시점 누수 검증
 │   ├── test_reco_provider.py   후보 조회 · 노출 정책 · 라이브 분리 검증
+│   ├── test_embedding_store.py 벡터 리터럴 · 조회 대상 검증
 │   ├── test_embedding.py     임베딩 유틸 검증
 │   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
 │   ├── run_scenarios.py      규칙 시나리오 실행 데모
 │   ├── train_bootstrap_model.py   ML 부트스트랩 학습
+│   ├── embed_products.py          상품 임베딩 배치 (DB 에 벡터 저장)
 │   ├── fetch_otpensource.py       임베딩 평가용 공개 데이터 변환
 │   ├── eval_embedding.py          임베딩 품질 Precision@K 측정
 │   ├── check_moderation_llm.py    검수 모델 실호출 점검
@@ -841,6 +844,60 @@ dict 를 돌려주므로 그냥 부를 수 있고, `PostgresProvider` 자체도 
 이득보다 연결이 죽었을 때의 복구 경로가 늘어나는 비용이 크다. 호출이 잦아지면 그때
 `psycopg_pool` 로 바꾼다.
 
+
+---
+
+# 임베딩 배치
+
+```bash
+python scripts/embed_products.py                 아직 안 된 것만
+python scripts/embed_products.py --limit 50      50건만 (처음 돌려볼 때)
+python scripts/embed_products.py --dry-run       계산만 하고 쓰지 않는다
+python scripts/embed_products.py --all           전부 다시 (모델을 바꿨을 때)
+```
+
+**AI 코드 중 유일하게 DB 에 쓰는 곳이다.** 백엔드는 벡터 컬럼을 건드리지 않으므로
+(`@Column(insertable=false, updatable=false)`) 채우는 것은 우리 몫이다.
+
+```sql
+GRANT UPDATE (text_embedding, image_embedding) ON product TO ai_user;
+```
+
+두 컬럼 말고는 아무것도 쓰지 않는다. 그 사실을 테스트로 고정해 두었다.
+
+## 무엇을 임베딩하나
+
+| | 출처 |
+| --- | --- |
+| 텍스트 | `product.title` + `product.description` → BGE-M3 1024차원 |
+| 이미지 | `product_image` 중 `sequence` 가 가장 앞선 것 → SigLIP 768차원 |
+
+`product_image` 가 비어 있으면 `thumbnail_url` 로 떨어진다 — 상품 등록 경로에 따라
+둘 중 하나만 채워질 수 있어서다.
+
+**검수를 통과하지 못한 상품(`PENDING` · `REJECTED`)은 계산하지 않는다.** 추천에
+나가지 않을 상품에 GPU 시간을 쓸 이유가 없고, 거부된 상품의 벡터가 남아 있으면
+정책이 바뀔 때 조용히 추천에 섞여 들어간다.
+
+## 사진 한 장 때문에 배치가 멈추지 않는다
+
+이미지를 못 읽으면 그 상품의 **이미지 벡터만 비우고** 텍스트는 그대로 저장한다.
+`NULL` 로 두는 것이 중요하다 — 0 벡터로 채우면 "닮은 것이 없다" 로 읽혀, 사진이
+없다는 이유만으로 추천 순위가 밀린다.
+
+## 다시 돌려도 안전하다
+
+이미 채워진 상품은 건너뛴다. 중간에 죽어도 이어서 하면 되고, 한 묶음씩 커밋하므로
+앞서 끝낸 작업이 날아가지 않는다.
+
+## 아직 못 하는 것 — 언제 다시 계산할지 모른다
+
+상품 설명이 수정되어도 알 수 없다. `embedded_at` · `embedding_model` 컬럼이 없어
+**어느 행이 낡았는지 판단할 근거가 DB 에 없다.** 지금은 비어 있는 것만 채우고,
+모델을 바꾸면 `--all` 로 전부 다시 돌린다.
+
+상품이 수천 건을 넘으면 그 두 컬럼을 요청하는 편이 낫다. 전부 다시 도는 비용이
+그때부터 무시할 수 없어진다.
 
 ---
 
