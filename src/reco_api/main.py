@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
@@ -27,13 +28,32 @@ from reco import RecoConfig, RecoResult, rank, similarities
 
 from .demo import demo_candidates, demo_vectors
 from .models import RecoHealthResponse, RecoItem, RecoResponse
-from .provider import CandidateProvider, InMemoryProvider, ProviderError
+from .provider import (
+    CandidateProvider,
+    InMemoryProvider,
+    PostgresProvider,
+    ProviderError,
+)
 
 log = logging.getLogger("reco_api")
 
 # 랭킹 전에 조회할 후보 풀. 최종 노출 개수보다 넉넉해야 한다 —
 # 여기서 잘리면 랭킹이 볼 수 없는 상품이 생긴다.
 CANDIDATE_POOL = 500
+
+# DB 가 설정되어 있으면 실제 조회를, 아니면 합성 데이터를 쓴다.
+#
+# **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
+# 추천 목록에는 데모 경매 5건만 나온다. 조용히 틀리느니 뜨지 않는 편이 낫다.
+DATABASE_URL = os.getenv("DIB_DATABASE_URL", "").strip()
+
+
+def _make_provider() -> CandidateProvider:
+    if not DATABASE_URL:
+        log.warning("DIB_DATABASE_URL 이 없어 합성 데이터로 동작합니다 (데모 경매 5건)")
+        return InMemoryProvider(demo_candidates(), demo_vectors())
+    log.info("실제 DB 에 연결합니다")
+    return PostgresProvider(DATABASE_URL)
 
 router = APIRouter()
 _state: dict[str, object] = {}
@@ -43,7 +63,7 @@ def startup() -> None:
     load_env()
     cfg = RecoConfig.load()
     _state["config"] = cfg
-    _state["provider"] = InMemoryProvider(demo_candidates(), demo_vectors())
+    _state["provider"] = _make_provider()
     log.info("추천 준비 완료 — config=%s, 가중치 %s", cfg.version, dict(cfg.weights))
 
 
@@ -113,6 +133,20 @@ def health(cfg: RecoConfig = Depends(get_config)) -> RecoHealthResponse:
     )
 
 
+def _by_scope(candidates, scope: str):
+    """라이브 · 일반 경매를 가른다 (명세 108).
+
+    `auction.live_broadcast_id` 가 채워져 있으면 라이브 방송 중 진행되는 경매다.
+    **두 목록의 순위를 따로 매긴다** — 섞어서 매긴 뒤 나누면 한쪽이 상위권을 다
+    가져가 다른 쪽 목록이 빈약해진다.
+    """
+    if scope == "LIVE":
+        return [c for c in candidates if c.is_live]
+    if scope == "GENERAL":
+        return [c for c in candidates if not c.is_live]
+    return list(candidates)
+
+
 @router.get(
     "/internal/reco/home",
     response_model=RecoResponse,
@@ -120,6 +154,15 @@ def health(cfg: RecoConfig = Depends(get_config)) -> RecoHealthResponse:
     summary="홈 리스트에 노출할 경매 순서",
 )
 def home(
+    scope: str = Query(
+        "ALL",
+        pattern="^(ALL|LIVE|GENERAL)$",
+        description=(
+            "`LIVE` = 라이브 방송 중 경매, `GENERAL` = 일반 경매, `ALL` = 둘 다. "
+            "명세 108 처럼 나눠 보여줄 때는 **두 번 호출해 각각 순위를 받으십시오** — "
+            "한 번에 받아 나누면 한쪽이 상위권을 다 가져가 다른 목록이 빈약해집니다"
+        ),
+    ),
     member_id: int | None = Query(
         None,
         description=(
@@ -137,7 +180,7 @@ def home(
     걸러내지 않으면 끝난 경매가 목록 맨 위에 올라온다. 제외된 건수는 `excluded` 에 담긴다.
     """
     now = datetime.now(timezone.utc)
-    candidates = _load_active(provider, now)
+    candidates = _by_scope(_load_active(provider, now), scope)
     return _to_response(rank(candidates, cfg, now, limit=limit))
 
 

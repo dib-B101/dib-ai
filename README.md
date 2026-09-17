@@ -21,6 +21,7 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 추천 — 유사 상품 (STEP 3) | 구현 완료, DB 컬럼 대기 | `src/reco/similarity.py` |
 | 백엔드 연동 (명세 92~95) | 구현 완료, HMAC 규약 합의 대기 | `src/internal_api/` |
 | 탐지 — 실DB 조회 | 구현 완료, 접속 정보 대기 | `src/fraud_api/queries.py` |
+| 추천 — 실DB 조회 | 후보 완료 · 벡터는 컬럼 분리 대기 | `src/reco_api/queries.py` |
 | 추천 — 개인화 (STEP 5~) | 미착수 | TBD |
 
 ## 폴더 구조
@@ -76,6 +77,7 @@ dib-ai/
 │   │   ├── main.py           엔드포인트
 │   │   ├── models.py         요청·응답 스키마
 │   │   ├── provider.py       후보 조회기
+│   │   ├── queries.py        후보·벡터 SQL + 행 변환
 │   │   └── demo.py           합성 후보 + 합성 벡터
 │   └── embedding/            상품 임베딩 (추천 STEP 2)
 │       ├── config.py         모델·차원. DB 컬럼과 항상 같아야 한다
@@ -94,6 +96,7 @@ dib-ai/
 │   ├── test_reco_similar.py  유사 상품 추천 검증
 │   ├── test_internal_api.py  명세 92~95 계약 검증
 │   ├── test_fraud_provider.py  실DB 조회 · 시점 누수 검증
+│   ├── test_reco_provider.py   후보 조회 · 노출 정책 · 라이브 분리 검증
 │   ├── test_embedding.py     임베딩 유틸 검증
 │   └── conftest.py           테스트를 로컬 .env 에서 격리
 ├── scripts/
@@ -731,7 +734,7 @@ python scripts/check_moderation_image.py 사진.jpg [사진2.jpg ...]
 
 ---
 
-# 실DB 조회 (탐지)
+# 실DB 조회 (탐지 · 추천)
 
 ```bash
 DIB_DATABASE_URL=postgresql://ai_readonly:비밀번호@호스트:5432/dib
@@ -781,6 +784,51 @@ pip install 'psycopg[binary]'
 
 기준값 계산에서 **이 경매 자신은 뺀다.** 넣으면 자기 값이 자기 기준선을 끌어올려,
 붐빈 경매일수록 평범해 보이는 역전이 생긴다.
+
+## 추천 후보 조회
+
+같은 `DIB_DATABASE_URL` 을 쓴다. 조회하는 것은 진행 중인 경매와 그 상품이다.
+
+**노출 정책은 조회에서 끝낸다.** 랭킹은 무엇을 보여줘도 되는지 모르고 점수만 매기므로,
+여기서 안 거르면 검수에 걸린 상품이 추천 목록에 올라온다.
+
+```sql
+WHERE a.status = 'ACTIVE'
+  AND a.started_at IS NOT NULL          -- 없으면 남은 시간을 계산할 수 없다
+  AND a.deleted_at IS NULL
+  AND p.deleted_at IS NULL
+  AND p.status <> ALL('{PENDING,REJECTED}')   -- 검수 미통과
+```
+
+마지막 줄이 **화이트리스트가 아니라 블랙리스트인 이유**가 있다. `REGISTERED` 만
+남기면 후보가 통째로 사라진다 — 경매가 시작되면 상품 상태가 `ON_AUCTION` 으로
+바뀌기 때문이다.
+
+### 라이브와 일반 나누기 (명세 108)
+
+`auction.live_broadcast_id` 가 채워져 있으면 라이브 방송 중 진행되는 경매다.
+
+```
+GET /internal/reco/home?scope=LIVE       라이브 방송 중 경매
+GET /internal/reco/home?scope=GENERAL    일반 경매
+GET /internal/reco/home?scope=ALL        둘 다 (기본값)
+```
+
+**나눠 보여줄 때는 두 번 호출한다.** 한 번에 받아 나누면 한쪽이 상위권을 다 가져가
+다른 목록이 빈약해진다. 실제로 데모에서도 전체 1위는 라이브 경매지만, 일반만 놓고
+보면 다른 경매가 1위다.
+
+한 번만 부르고 직접 가르고 싶으면 각 항목의 `detail.live_broadcast_id` 를 보면 된다.
+
+### 임베딩 조회
+
+`product.text_embedding` · `product.image_embedding` 두 컬럼을 읽는다.
+**`LEFT JOIN` 이 아니라 `JOIN` 이다** — 벡터가 없는 상품은 행 자체가 빠져야 호출자가
+"아직 임베딩 안 됨" 과 "안 닮음" 을 구분할 수 있다.
+
+pgvector 값이 리스트로 올지 `'[0.1,0.2]'` 문자열로 올지는 드라이버 설정에 달렸다.
+**둘 다 받는다** — 한쪽만 처리하면 드라이버를 바꾸는 순간 조용히 빈 벡터가 되고,
+유사도가 전부 0 이 되어 유사 상품 추천이 인기순과 구별되지 않는다.
 
 ## DB 없이 검증한다
 

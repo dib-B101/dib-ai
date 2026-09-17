@@ -7,10 +7,15 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Mapping, Protocol, Sequence
 
 from reco import Candidate, ProductVector
+
+from . import queries
+
+log = logging.getLogger("reco_api.provider")
 
 
 class ProviderError(RuntimeError):
@@ -53,24 +58,16 @@ class InMemoryProvider:
 
 
 class PostgresProvider:
-    """실제 DB 조회. 아래 쿼리로 구현한다.
+    """실제 DB 조회. 읽기 전용 계정으로 접속한다.
 
-        SELECT a.auction_id, a.product_id, p.member_id AS seller_id, p.category_id,
-               a.started_at, a.auction_time, a.ended_at,
-               a.view_count, a.bookmark_count, a.bid_count, a.bidder_count
-        FROM auction a
-        JOIN product p USING (product_id)
-        WHERE a.status = 'ACTIVE'
-          AND a.deleted_at IS NULL
-        LIMIT :pool
+        auction JOIN product   진행 중인 경매 · 판매자 · 카테고리 · 라이브 여부
+        product (벡터)         text_embedding · image_embedding
 
-    두 가지를 주의한다.
+    SQL 과 행 변환은 `queries.py` 에 있다 — DB 없이 검증할 수 있게 하기 위해서다.
 
-    **판매자는 `auction` 이 아니라 `product` 에 있다.** `auction` 에는 `member_id` 가
-    없으므로 `product` 를 조인해야 한다.
-
-    **`LIMIT` 은 랭킹 전에 자르는 후보 풀이다.** 최종 노출 개수보다 넉넉히 잡아야
-    한다 — 여기서 잘리면 랭킹이 볼 수 없는 상품이 생긴다.
+    노출 정책(검수 통과 · 삭제 · 진행 상태)은 **조회에서 끝낸다.** 랭킹은 무엇을
+    보여줘도 되는지 모르고 점수만 매기므로, 여기서 안 거르면 검수에 걸린 상품이
+    추천 목록에 올라온다.
     """
 
     name = "postgres"
@@ -78,38 +75,68 @@ class PostgresProvider:
     def __init__(self, dsn: str) -> None:
         self._dsn = dsn
 
+    def _connect(self):
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:  # pragma: no cover - 설치 여부에 달린 경로
+            raise ProviderError(
+                "psycopg 가 설치되어 있지 않습니다. pip install 'psycopg[binary]'"
+            ) from exc
+
+        try:
+            return psycopg.connect(self._dsn, row_factory=dict_row)
+        except Exception as exc:
+            raise ProviderError(f"DB 연결 실패: {exc}") from exc
+
     def load_active(self, now: datetime, limit: int) -> Sequence[Candidate]:
-        raise ProviderError(
-            "PostgresProvider 는 아직 구현되지 않았습니다. DB 연결 후 채우세요."
-        )
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    queries.ACTIVE_CANDIDATES_SQL,
+                    {
+                        "hidden_status": list(queries.HIDDEN_PRODUCT_STATUS),
+                        "limit": limit,
+                    },
+                )
+                return queries.to_candidates(cur.fetchall())
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(f"추천 후보 조회 실패: {exc}") from exc
+        finally:
+            conn.close()
 
     def load_vectors(self, auction_ids: Sequence[int]) -> Mapping[int, ProductVector]:
-        """`product_embedding` 에서 벡터를 읽는다.
+        """`product` 의 임베딩 두 컬럼을 읽는다.
 
-            SELECT a.auction_id, e.text_embedding, e.image_embedding
-            FROM auction a
-            JOIN product_embedding e USING (product_id)
-            WHERE a.auction_id = ANY(:auction_ids)
+        **가진 것만 돌려준다.** 아직 배치가 돌지 않은 상품은 행 자체가 빠지므로
+        호출자가 "유사도를 모름" 과 "안 닮음" 을 구분할 수 있다.
 
-        **`JOIN` 이지 `LEFT JOIN` 이 아니다.** 벡터가 없는 상품은 행 자체가 빠져야
-        호출자가 "아직 임베딩 안 됨" 으로 처리할 수 있다. `LEFT JOIN` 으로 NULL 을
-        받으면 0 벡터로 채우고 싶은 유혹이 생기는데, 0 은 "안 닮음" 으로 읽힌다.
-
-        `image_embedding` 은 컬럼 자체가 NULL 일 수 있다 — 사진을 못 읽었거나
-        이미지 배치가 아직 안 돈 상품이다. 그대로 `ProductVector.image=None` 이다.
-
-        후보가 수만 건으로 늘면 이 방식(전체 로드 후 파이썬 계산)이 한계에 온다.
+        후보가 수만 건으로 늘면 이 방식(전부 읽어 파이썬에서 계산)이 한계에 온다.
         그때는 pgvector 인덱스로 DB 에서 상위 N 만 받아 오면 된다.
 
-            SELECT a.auction_id, e.text_embedding <=> :seed_vec AS distance
-            FROM auction a JOIN product_embedding e USING (product_id)
-            WHERE a.status = 'ACTIVE' AND a.auction_id <> :seed_id
-            ORDER BY e.text_embedding <=> :seed_vec
-            LIMIT :n
+            SELECT a.auction_id, p.text_embedding <=> %(seed)s AS distance
+            FROM auction a JOIN product p ON p.product_id = a.product_id
+            WHERE a.status = 'ACTIVE' AND a.auction_id <> %(seed_id)s
+            ORDER BY p.text_embedding <=> %(seed)s
+            LIMIT %(n)s
 
-        `<=>` 는 코사인 거리라 **작을수록 가깝다.** 유사도로 쓰려면 `1 - distance`
+        `<=>` 는 코사인 **거리**라 작을수록 가깝다. 유사도로 쓰려면 `1 - distance`
         로 뒤집어야 한다. 부호를 그대로 두면 가장 안 닮은 상품이 1위가 된다.
         """
-        raise ProviderError(
-            "PostgresProvider 는 아직 구현되지 않았습니다. DB 연결 후 채우세요."
-        )
+        if not auction_ids:
+            return {}
+
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(queries.VECTORS_SQL, {"auction_ids": list(auction_ids)})
+                return queries.to_vectors(cur.fetchall())
+        except ProviderError:
+            raise
+        except Exception as exc:
+            raise ProviderError(f"임베딩 조회 실패: {exc}") from exc
+        finally:
+            conn.close()

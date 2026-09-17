@@ -135,7 +135,16 @@ def rank(
         if boost is not None:
             score += boost(c)
         scored.append(
-            Scored(c.auction_id, score, u, pops[i], comps[i], remaining, similarity=sim)
+            Scored(
+                c.auction_id,
+                score,
+                u,
+                pops[i],
+                comps[i],
+                remaining,
+                similarity=sim,
+                live_broadcast_id=c.live_broadcast_id,
+            )
         )
 
     # 점수 내림차순. 동점은 auction_id 오름차순으로 고정해 결과를 재현 가능하게 둔다.

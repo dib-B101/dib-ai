@@ -27,10 +27,18 @@ class Candidate:
     auction_time: int       # 초. 생성 시 확정되며 연장해도 바뀌지 않는다
     ended_at: datetime | None = None   # 연장을 반영한 현재 예정 종료시각
 
+    # 라이브 방송 중 진행되는 경매면 그 방송 id. 일반 경매는 None.
+    # 명세 108번이 라이브와 일반을 나눠 달라고 해서 후보에 실어 둔다.
+    live_broadcast_id: int | None = None
+
     view_count: int = 0
     bookmark_count: int = 0
     bid_count: int = 0
     bidder_count: int = 0
+
+    @property
+    def is_live(self) -> bool:
+        return self.live_broadcast_id is not None
 
     def remaining_seconds(self, now: datetime) -> float:
         """남은 시간(초). 이미 끝났으면 0 이하가 나온다.
@@ -54,6 +62,10 @@ class Scored:
     remaining_seconds: float
     similarity: float = 0.0   # 유사 상품 추천일 때만. 인기순에서는 0
 
+    # 라이브 방송 중 경매면 그 방송 id. 명세 108 이 라이브와 일반을 나눠 달라고 해서
+    # 순위 결과에 실어 보낸다 — 백엔드가 다시 조회하지 않고 가를 수 있다.
+    live_broadcast_id: int | None = None
+
     def breakdown(self) -> dict[str, Any]:
         """왜 이 순위인지 설명하는 값들.
 
@@ -66,6 +78,7 @@ class Scored:
             "competition": round(self.competition, 4),
             "remaining_seconds": round(self.remaining_seconds, 1),
             "similarity": round(self.similarity, 4),
+            "live_broadcast_id": self.live_broadcast_id,
         }
 
 

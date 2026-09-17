@@ -6,6 +6,7 @@ DB 없이 랭킹이 어떻게 동작하는지 눈으로 확인하기 위한 데�
     인기 많지만 시간이 많이 남음   → 인기도는 높고 마감 임박도는 낮다
     관심 없지만 곧 끝남           → 그 반대
     이미 끝남                    → 후보에서 빠져야 한다
+    라이브 방송 중                → scope=LIVE / GENERAL 로 갈린다
 
 마지막 것이 중요하다. 종료된 경매는 남은 시간이 0 이하라 마감 임박도가 최대가 되므로,
 걸러내지 않으면 **끝난 경매가 목록 맨 위에 올라온다.**
@@ -34,16 +35,19 @@ def demo_candidates(now: datetime | None = None) -> tuple[Candidate, ...]:
             started_at=at(hours=-2), auction_time=28800, ended_at=at(hours=6),
             view_count=4200, bookmark_count=180, bid_count=31, bidder_count=12,
         ),
-        # 관심은 적지만 2분 뒤 마감
+        # 관심은 적지만 2분 뒤 마감. 같은 방송의 두 번째 경매다
         Candidate(
             auction_id=20002, product_id=2, seller_id=502, category_id=2,
             started_at=at(hours=-1), auction_time=3720, ended_at=at(minutes=2),
+            live_broadcast_id=3001,
             view_count=90, bookmark_count=3, bid_count=2, bidder_count=2,
         ),
-        # 중간. 40분 남았고 경쟁이 붙어 있다
+        # 중간. 40분 남았고 경쟁이 붙어 있다. **라이브 방송 중인 경매다** —
+        # scope=LIVE / GENERAL 분리가 동작하는지 확인하는 용도다
         Candidate(
             auction_id=20003, product_id=3, seller_id=501, category_id=1,
             started_at=at(hours=-1), auction_time=6000, ended_at=at(minutes=40),
+            live_broadcast_id=3001,
             view_count=1500, bookmark_count=64, bid_count=18, bidder_count=9,
         ),
         # 갓 올라와 아무 지표도 없다. 정보 없음이 곧 나쁨은 아니다
