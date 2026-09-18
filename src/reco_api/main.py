@@ -190,6 +190,47 @@ def _personalize(provider, cfg: RecoConfig, member_id: int, candidates, now):
     return scores
 
 
+def rank_for_member(
+    provider,
+    cfg: RecoConfig,
+    candidates,
+    now,
+    member_id: int | None,
+    limit: int | None = None,
+):
+    """회원이 있으면 개인화해서, 없으면 인기순으로 순위를 매긴다.
+
+    **동기 엔드포인트와 비동기 명세 94번이 이 함수를 함께 쓴다.** 두 경로가
+    갈라지면 같은 회원이 문에 따라 다른 추천을 받고, 백엔드가 한쪽만 붙였을 때
+    "왜 개인화가 안 되지" 를 디버깅하게 된다. 탐지에서 `score_bidders` 를 뺀 것과
+    같은 이유다.
+    """
+    scores = (
+        _personalize(provider, cfg, member_id, candidates, now)
+        if member_id is not None
+        else None
+    )
+    if not scores:
+        return rank(candidates, cfg, now, limit=limit)
+
+    # 이미 관심을 보인 경매는 후보에서도 뺀다. 점수만 안 주고 남겨 두면
+    # 유사도 0 으로 계산되어 목록 끝에 붙는다 — 빼는 것이 맞다.
+    fresh = [c for c in candidates if c.auction_id in scores]
+    result = rank(
+        fresh,
+        cfg,
+        now,
+        limit=limit,
+        similarity=scores,
+        strategy="personalized",
+        similarity_weight=cfg.personalization_weight,
+    )
+    already = len(candidates) - len(fresh)
+    if already:
+        result.excluded["already_seen"] = already
+    return result
+
+
 def _by_scope(candidates, scope: str):
     """라이브 · 일반 경매를 가른다 (명세 108).
 
@@ -240,26 +281,9 @@ def home(
     now = datetime.now(timezone.utc)
     candidates = _by_scope(_load_active(provider, now), scope)
 
-    scores = (
-        _personalize(provider, cfg, member_id, candidates, now)
-        if member_id is not None
-        else None
+    return _to_response(
+        rank_for_member(provider, cfg, candidates, now, member_id, limit)
     )
-    if scores:
-        # 이미 관심을 보인 경매는 후보에서도 뺀다. 점수만 안 주고 남겨 두면
-        # 유사도 0 으로 계산되어 목록 끝에 붙는다 — 빼는 것이 맞다.
-        fresh = [c for c in candidates if c.auction_id in scores]
-        result = rank(
-            fresh, cfg, now, limit=limit,
-            similarity=scores, strategy="personalized",
-            similarity_weight=cfg.personalization_weight,
-        )
-        already = len(candidates) - len(fresh)
-        if already:
-            result.excluded["already_seen"] = already
-    else:
-        result = rank(candidates, cfg, now, limit=limit)
-    return _to_response(result)
 
 
 @router.get(

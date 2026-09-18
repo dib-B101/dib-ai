@@ -38,7 +38,7 @@ from fraud.ml_features import FEATURE_VERSION
 from fraud_api import main as fraud_app
 from fraud_api import queries as fraud_queries
 from fraud_api.provider import ProviderError as FraudProviderError
-from reco import RecoConfig, rank, reason_for
+from reco import RecoConfig, reason_for
 from reco_api import main as reco_app
 from reco_api.provider import ProviderError as RecoProviderError
 
@@ -284,9 +284,13 @@ async def request_recommendation(
 ) -> JobAccepted:
     """추천 순서를 만들어 `callbackUrl` 로 보낸다.
 
-    **`memberId` 와 `behaviorWindow` 는 아직 쓰지 않는다.** 개인화(STEP 5) 전이라
-    누가 요청하든 같은 순서가 나온다. 계약을 미리 맞춰 두는 것은 개인화가 붙을 때
-    백엔드 연동을 두 번 하지 않기 위해서다.
+    `memberId` 를 주면 **행동 로그로 관심 프로필을 만들어 개인화**한다. 동기
+    엔드포인트(`/internal/reco/home`)와 같은 함수를 쓰므로 두 경로의 결과가
+    갈라지지 않는다. 로그가 없으면 자동으로 인기순으로 떨어진다.
+
+    `behaviorWindow` 는 아직 쓰지 않는다. 조회 구간은 `config/reco.yaml` 의
+    `lookback_days` 가 정한다 — 요청마다 구간이 달라지면 같은 회원의 추천이
+    호출자에 따라 바뀐다. 받아만 두고 무시한다.
     """
     body = await _verified_body(request)
     req: RecommendationRequest = _parse(RecommendationRequest, body)
@@ -321,7 +325,11 @@ def _run_recommendation(req: RecommendationRequest, cfg: RecoConfig, provider) -
             allowed = set(req.candidate_auction_ids)
             candidates = [c for c in candidates if c.auction_id in allowed]
 
-        result = rank(candidates, cfg, now)
+        # 동기 엔드포인트와 **같은 함수**를 쓴다. 두 경로가 갈라지면 같은 회원이
+        # 문에 따라 다른 추천을 받는다.
+        result = reco_app.rank_for_member(
+            provider, cfg, candidates, now, req.member_id
+        )
         payload = RecommendationCallback(
             job_id=req.job_id,
             member_id=req.member_id,

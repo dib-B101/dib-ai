@@ -436,3 +436,81 @@ def test_gated_bidder_is_not_retried(client, sent):
     post_signed(client, BID_ANOMALIES, bid_request(memberId=999_999))
 
     assert sent == []
+
+
+# --- 94번이 개인화를 실제로 쓰는가 ------------------------------------------
+
+
+class _EventProvider:
+    """데모 후보·벡터에 행동 로그만 얹은 조회기.
+
+    `InMemoryProvider` 는 로그가 없어 개인화가 늘 폴백된다. 비동기 경로가
+    **정말로 개인화를 타는지** 보려면 로그가 있어야 한다.
+    """
+
+    name = "in-memory(events)"
+
+    def __init__(self, inner, events):
+        self._inner, self._events = inner, events
+
+    def load_active(self, now, limit):
+        return self._inner.load_active(now, limit)
+
+    def load_vectors(self, auction_ids):
+        return self._inner.load_vectors(auction_ids)
+
+    def load_events(self, member_id, since, limit):
+        return self._events.get(member_id, ())
+
+
+@pytest.fixture
+def with_events(monkeypatch):
+    """회원 7 이 아이폰(20001)에 입찰한 상태로 만든다."""
+    from datetime import datetime, timezone
+
+    from reco import BehaviorEvent
+    from reco_api import main as reco_app
+
+    inner = reco_app._state["provider"]
+    events = {7: (BehaviorEvent("BID", 20001, datetime.now(timezone.utc)),)}
+    monkeypatch.setitem(reco_app._state, "provider", _EventProvider(inner, events))
+
+
+def test_async_path_uses_personalization(client, sent, with_events):
+    """명세 94번이 동기 엔드포인트와 **같은 개인화 함수**를 쓴다.
+
+    두 경로가 갈라지면 같은 회원이 문에 따라 다른 추천을 받고, 백엔드가 한쪽만
+    붙였을 때 "왜 개인화가 안 되지" 를 디버깅하게 된다.
+    """
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p1", memberId=7))
+    ids = [i["auctionId"] for i in json.loads(sent[0]["body"])["items"]]
+
+    # 아이폰(20001)에 입찰했으므로 같은 카테고리인 갤럭시(20003)가 1위여야 한다
+    assert ids[0] == 20003
+
+
+def test_async_path_excludes_already_seen(client, sent, with_events):
+    """입찰한 경매를 다시 추천하면 안 된다. 동기 경로와 같은 규칙이다."""
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p2", memberId=7))
+    ids = [i["auctionId"] for i in json.loads(sent[0]["body"])["items"]]
+
+    assert 20001 not in ids, "입찰한 경매가 추천에 남았다"
+
+
+def test_async_and_sync_agree(client, sent, with_events):
+    """같은 회원이면 두 경로의 순서가 같아야 한다."""
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p3", memberId=7))
+    async_ids = [i["auctionId"] for i in json.loads(sent[0]["body"])["items"]]
+
+    sync = client.get("/internal/reco/home", params={"member_id": 7}).json()
+    sync_ids = [i["auction_id"] for i in sync["items"]]
+
+    assert sync["strategy"] == "personalized"
+    assert async_ids == sync_ids
+
+
+def test_member_without_events_still_gets_recommendations(client, sent, with_events):
+    """로그가 없는 회원은 인기순으로 떨어진다. 비어서 나가면 안 된다."""
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p4", memberId=999))
+
+    assert json.loads(sent[0]["body"])["items"], "폴백이 비면 화면이 빈다"
