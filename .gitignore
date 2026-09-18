@@ -46,8 +46,15 @@ env/
 .mypy_cache/
 
 # Model artifacts and outputs
-artifacts/
-*.joblib
+#
+# **탐지 모델은 추적한다.** 300KB 라 레포에 둘 수 있고, 없으면 서버가 조용히
+# 규칙 트랙만으로 뜬다 — 예외도 안 나고 판정도 나가는데 `ml_score` 만 null 이 되어
+# 섀도 모드가 아무것도 못 모은다. 클론한 사람이 그 사실을 알 방법이 없다.
+#
+# 큰 산출물(임베딩 캐시·실험 결과 등)은 계속 뺀다.
+artifacts/*
+!artifacts/shill_lgbm_v0.joblib
+!artifacts/model_meta.json
 *.pkl
 *.onnx
 

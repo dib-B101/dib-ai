@@ -1,0 +1,18 @@
+# 테스트 · 노트북 · 모델 학습.
+#
+#     pip install -r requirements-dev.txt
+#
+# 배포에는 넣지 않는다. 임베딩까지 손보려면 requirements-batch.txt 도 같이 깐다.
+
+-r requirements.txt
+
+# --- 테스트 ------------------------------------------------------------------
+pytest>=8.0
+httpx>=0.27          # fastapi.testclient 가 사용
+
+# --- EDA · 모델 학습 ----------------------------------------------------------
+# `notebooks/` 와 `scripts/train_bootstrap_model.py` 에서 쓴다.
+matplotlib
+seaborn
+scipy
+shap>=0.44           # 피처 기여도 확인 (학습 때만)

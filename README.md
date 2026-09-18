@@ -118,26 +118,47 @@ dib-ai/
 │   └── Shill Bidding Dataset.csv
 ├── .env.example              키·모델 설정 서식. 복사해서 .env 로 쓴다
 ├── pytest.ini
-└── requirements.txt
+├── requirements.txt          서버 실행용
+├── requirements-batch.txt    임베딩 배치용 (torch · transformers)
+└── requirements-dev.txt      테스트 · 노트북 · 모델 학습
 ```
 
-학습된 모델 바이너리(`artifacts/`)는 저장소에 포함하지 않는다. 노트북을 실행하면 재생성된다.
+**탐지 모델(`artifacts/shill_lgbm_v0.joblib`, 300KB)은 저장소에 포함한다.** 없으면 서버가
+조용히 규칙 트랙만으로 뜨기 때문이다 — 예외도 안 나고 판정도 나가는데 `ml_score` 만
+null 이 되어, 클론한 사람이 그 사실을 알 방법이 없다. 나머지 산출물은 추적하지 않는다.
 
 ## 실행
 
+의존성은 **세 갈래**다. 서버는 `torch` 를 쓰지 않는다 — 벡터를 만드는 것은 배치이고,
+서버는 DB 에 이미 들어 있는 벡터를 읽기만 한다. 한 파일로 두면 배포 이미지에 2GB 가
+필요 없이 딸려 간다.
+
+| 파일 | 쓰는 곳 |
+| --- | --- |
+| `requirements.txt` | **서버** — 탐지 · 검수 · 추천 API |
+| `requirements-batch.txt` | 임베딩 배치 (`scripts/embed_products.py`, GPU 권장) |
+| `requirements-dev.txt` | 테스트 · 노트북 · 모델 학습 |
+
 ```bash
 python -m venv .venv && .venv/Scripts/activate   # Windows
-pip install -r requirements.txt
+pip install -r requirements-dev.txt     # 개발은 이것 (서버 것을 포함한다)
 
 cp .env.example .env                    # 그리고 API 키를 채운다
 
-python -m pytest                        # 테스트 145개
+python -m pytest                        # 테스트
 python scripts/run_scenarios.py         # 규칙 시나리오별 점수 확인
 python scripts/train_bootstrap_model.py # ML 부트스트랩 학습
 
 # API 서버 — 탐지 · 검수 · 추천을 함께 띄운다
 PYTHONPATH=src uvicorn serve:app --reload --port 8000
 #   http://localhost:8000/docs   ← 백엔드는 여기를 보고 연동한다
+```
+
+배포는 `requirements.txt` 만 깐다.
+
+```bash
+pip install -r requirements.txt
+PYTHONPATH=src uvicorn serve:app --host 0.0.0.0 --port 8000
 ```
 
 ### 설정은 `.env` 로 한다
