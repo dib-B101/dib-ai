@@ -1,0 +1,148 @@
+{
+  "model": "LGBMClassifier + CalibratedClassifierCV(isotonic)",
+  "model_version": "lgbm-v0",
+  "trained_on": "eBay Shill Bidding Dataset",
+  "features": [
+    "Bidder_Tendency",
+    "Bidding_Ratio",
+    "Last_Bidding",
+    "Auction_Bids",
+    "Starting_Price_Average",
+    "Early_Bidding",
+    "Winning_Ratio"
+  ],
+  "excluded_features": {
+    "Successive_Outbidding": "서비스 정책상 최고 입찰자의 연속 입찰이 불가능해 항상 0 이다",
+    "Auction_Duration": "eBay 는 경매 기간을 1~10 '일' 로 기록한다. 우리는 라이브(분 단위)와 일반 경매(판매자 자유 설정)가 섞여 이 값이 '긴 경매인가' 가 아니라 '라이브냐 일반이냐' 를 가리키게 된다. 학습 때 없던 의미다"
+  },
+  "redefined_features": {
+    "Bidder_Tendency": "구독하지 않은 판매자에 대한 편중도로 재정의한다. eBay 에는 구독 개념이 없어 학습은 원본 값 그대로 하고, 서빙에서만 구독 건을 분자·분모에서 뺀다"
+  },
+  "holdout": {
+    "pr_auc": 0.7054,
+    "roc_auc": 0.9658,
+    "best_threshold": 0.4571,
+    "precision": 0.6976,
+    "recall": 0.7448,
+    "brier_calibrated": 0.0437
+  },
+  "feature_importance": {
+    "Bidding_Ratio": 0.3534,
+    "Auction_Bids": 0.1734,
+    "Winning_Ratio": 0.126,
+    "Bidder_Tendency": 0.1224,
+    "Early_Bidding": 0.0962,
+    "Last_Bidding": 0.0746,
+    "Starting_Price_Average": 0.054
+  },
+  "operating_points": [
+    {
+      "threshold": 0.2,
+      "flagged": 419,
+      "precision": 0.4343675417661098,
+      "recall": 0.9479166666666666,
+      "missed": 10
+    },
+    {
+      "threshold": 0.3,
+      "flagged": 263,
+      "precision": 0.6121673003802282,
+      "recall": 0.8385416666666666,
+      "missed": 31
+    },
+    {
+      "threshold": 0.4,
+      "flagged": 260,
+      "precision": 0.6153846153846154,
+      "recall": 0.8333333333333334,
+      "missed": 32
+    },
+    {
+      "threshold": 0.5,
+      "flagged": 135,
+      "precision": 0.7481481481481481,
+      "recall": 0.5260416666666666,
+      "missed": 91
+    },
+    {
+      "threshold": 0.6,
+      "flagged": 112,
+      "precision": 0.7857142857142857,
+      "recall": 0.4583333333333333,
+      "missed": 104
+    },
+    {
+      "threshold": 0.7,
+      "flagged": 106,
+      "precision": 0.7924528301886793,
+      "recall": 0.4375,
+      "missed": 108
+    },
+    {
+      "threshold": 0.8,
+      "flagged": 106,
+      "precision": 0.7924528301886793,
+      "recall": 0.4375,
+      "missed": 108
+    }
+  ],
+  "risk_bands": {
+    "low": [
+      0.0,
+      0.3
+    ],
+    "medium": [
+      0.3,
+      0.6
+    ],
+    "high": [
+      0.6,
+      1.0
+    ]
+  },
+  "random_state": 42,
+  "usage": "관리자 검토 큐 정렬 전용. 자동 제재 금지.",
+  "hyperparameters": {
+    "tuned": true,
+    "method": "평가셋 25% 를 먼저 분리한 뒤 나머지에서 GroupKFold(5) · 120회 무작위 탐색",
+    "cv_score": 0.7665,
+    "holdout_score": 0.7539,
+    "vs_handpicked": "PR-AUC +0.039, 재현율 0.713 -> 0.812"
+  },
+  "caveats": [
+    "eBay 데이터로 학습했으므로 우리 서비스 성능이 아니다. 파이프라인 검증용이다.",
+    "Bidding_Ratio 상한이 다르다. 우리 정책상 한 입찰자의 비중은 (n+1)/2n 을 넘을 수 없다.",
+    "eBay 라벨은 Successive_Outbidding 에 강하게 의존한다. A 구성의 0.99 는 인용하지 말 것.",
+    "holdout 은 단일 시드 결과다. 시드 간 표준편차가 0.02~0.06 이므로 0.01 수준의 차이로 피처 조합을 판단하지 말 것. seed_variance 를 함께 볼 것."
+  ],
+  "seed_variance": {
+    "seeds": [
+      42,
+      7,
+      123,
+      2024,
+      31337
+    ],
+    "pr_auc": {
+      "mean": 0.7181,
+      "std": 0.0158
+    },
+    "precision": {
+      "mean": 0.6633,
+      "std": 0.0415
+    },
+    "recall": {
+      "mean": 0.7692,
+      "std": 0.0497
+    }
+  },
+  "serving_features_contract": [
+    "Bidding_Ratio",
+    "Last_Bidding",
+    "Auction_Bids",
+    "Starting_Price_Average",
+    "Early_Bidding",
+    "Winning_Ratio",
+    "Bidder_Tendency"
+  ]
+}
