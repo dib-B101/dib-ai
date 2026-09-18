@@ -74,7 +74,21 @@ class DetectResponse(BaseModel):
         ..., description="규칙 임계값 설정 버전. 과거 판정을 해석할 때 필요하다"
     )
     model_version: str | None = Field(
-        None, description="→ fraud_detection.model_version. 모델 트랙 가동 전에는 null"
+        None,
+        description=(
+            "→ fraud_detection.model_version. **`ml_score` 를 만든 모델**을 가리킨다. "
+            "`ml_score` 가 null 이면 이것도 null 이다. "
+            "모델이 risk_score 에 실제로 반영됐는지는 `weights.w_ml` 로 판단하십시오 — "
+            "`ml_shadow` 가 true 면 점수를 냈지만 판정에는 쓰지 않았다는 뜻입니다"
+        ),
+    )
+    ml_shadow: bool = Field(
+        False,
+        description=(
+            "섀도 모드 여부. true 면 **모델 점수를 계산해 담았지만 risk_score 에는 "
+            "섞지 않았다** — `risk_score` 는 `rule_score` 와 같다. "
+            "모델을 켜기 전에 두 트랙을 비교할 자료를 모으는 단계다"
+        ),
     )
     weights: dict[str, float] = Field(
         ..., description="risk_score 를 만들 때 쓴 가중치", examples=[{"w_rule": 1.0, "w_ml": 0.0}]

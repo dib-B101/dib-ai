@@ -81,29 +81,64 @@ def test_feature_mismatch_is_rejected(tmp_path):
 
 # ---------------------------------------------------------------- API 연결
 
-def test_api_returns_ml_score_when_enabled(monkeypatch):
-    """w_ml 을 올리면 ml_score 와 model_version 이 채워진다."""
+def detect(monkeypatch=None, **overrides) -> dict:
     import fraud_api.main as api
 
-    monkeypatch.setattr(api, "W_ML", 0.3)
-    monkeypatch.setattr(api, "W_RULE", 0.7)
-
+    for name, value in overrides.items():
+        monkeypatch.setattr(api, name, value)
     with TestClient(api.app) as c:
-        body = c.post("/internal/fraud/detect", json={"auction_id": 10002}).json()
+        return c.post("/internal/fraud/detect", json={"auction_id": 10002}).json()
+
+
+def test_api_returns_ml_score_when_enabled(monkeypatch):
+    """w_ml 을 올리면 ml_score 와 model_version 이 채워진다."""
+    body = detect(monkeypatch, W_ML=0.3, W_RULE=0.7)
 
     assert body["model_version"]
     assert body["weights"] == {"w_rule": 0.7, "w_ml": 0.3}
+    assert body["ml_shadow"] is False, "점수에 반영됐으므로 섀도가 아니다"
     assert all(r["ml_score"] is not None for r in body["results"])
 
 
-def test_api_keeps_ml_score_null_when_disabled():
-    """기본값은 규칙 100% 다. eBay 모델은 우리 도메인에서 검증된 적이 없다."""
-    import fraud_api.main as api
+# ---------------------------------------------------------------- 섀도 모드
+#
+# 모델을 켜려면 우리 데이터에서 룰보다 나은지 보여야 하는데, 가중치가 0 이라고
+# 모델을 아예 안 부르면 비교할 자료가 영영 안 쌓인다. 섀도는 그 교착을 푼다.
 
-    with TestClient(api.app) as c:
-        body = c.post("/internal/fraud/detect", json={"auction_id": 10002}).json()
 
+def test_shadow_computes_ml_without_changing_the_verdict(monkeypatch):
+    """**판정은 한 자리도 바뀌지 않는다.** 이게 깨지면 섀도가 아니라 조용한 롤아웃이다."""
+    body = detect(monkeypatch, W_ML=0.0, W_RULE=1.0, ML_SHADOW=True)
+
+    assert body["ml_shadow"] is True
     assert body["weights"]["w_ml"] == 0.0
+    assert all(r["ml_score"] is not None for r in body["results"]), "비교할 값이 없다"
+    assert all(r["risk_score"] == r["rule_score"] for r in body["results"])
+
+
+def test_shadow_records_which_model_produced_the_score(monkeypatch):
+    """어느 모델이 낸 점수인지 모르면 나중에 비교를 못 한다. 섀도로 모으는 이유가 그것이다."""
+    body = detect(monkeypatch, W_ML=0.0, W_RULE=1.0, ML_SHADOW=True)
+
+    assert body["model_version"]
+
+
+def test_shadow_scores_equal_the_enabled_scores(monkeypatch):
+    """섀도가 다른 값을 낸다면 지금 모으는 자료로 나중을 예측할 수 없다."""
+    shadow = detect(monkeypatch, W_ML=0.0, W_RULE=1.0, ML_SHADOW=True)
+    live = detect(monkeypatch, W_ML=0.3, W_RULE=0.7, ML_SHADOW=True)
+
+    def by_member(body):
+        return {r["member_id"]: r["ml_score"] for r in body["results"]}
+
+    assert by_member(shadow) == pytest.approx(by_member(live))
+
+
+def test_shadow_off_skips_the_model_entirely(monkeypatch):
+    """끄면 추론 자체를 안 한다. 모델이 느려지거나 터질 때 빠져나갈 문이 있어야 한다."""
+    body = detect(monkeypatch, W_ML=0.0, W_RULE=1.0, ML_SHADOW=False)
+
+    assert body["ml_shadow"] is False
     assert body["model_version"] is None
     assert all(r["ml_score"] is None for r in body["results"])
 

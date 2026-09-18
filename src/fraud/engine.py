@@ -153,8 +153,13 @@ def combine(rule_score: float, ml_score: float | None, w_rule: float, w_ml: floa
     피처를 합치는 것이 아니라 각각 점수를 낸 뒤 합친다. eBay 로 학습한 모델은
     입력 피처 8개가 고정이라 우리 신규 피처를 넣을 수 없기 때문이다.
     두 점수는 각각 저장해야 나중에 어느 쪽이 정확했는지 비교할 수 있다.
+
+    **`w_ml` 이 0 이면 `ml_score` 가 있어도 규칙 점수를 그대로 돌려준다.** 섀도
+    모드가 이 성질에 기댄다 — 모델 점수를 계산해 남기되 판정은 건드리지 않는다.
+    식으로 계산해도 결과는 같지만, 나눗셈을 거치면 `0.7 × r / 0.7 ≠ r` 처럼 끝자리가
+    흔들려 "가중치를 0 으로 뒀는데 점수가 왜 달라졌지" 를 쫓게 된다.
     """
-    if ml_score is None:
+    if ml_score is None or w_ml <= 0:
         return rule_score
     total = w_rule + w_ml
     if total <= 0:
