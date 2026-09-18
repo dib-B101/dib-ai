@@ -45,15 +45,15 @@ CANDIDATE_POOL = 500
 #
 # **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
 # 추천 목록에는 데모 경매 5건만 나온다. 조용히 틀리느니 뜨지 않는 편이 낫다.
-DATABASE_URL = os.getenv("DIB_DATABASE_URL", "").strip()
-
-
 def _make_provider() -> CandidateProvider:
-    if not DATABASE_URL:
+    # `.env` 는 startup()에서 로드된다. 모듈 import 시점에 값을 고정하면 uvicorn이
+    # 앱을 import한 뒤 `.env`를 읽는 정상 실행 순서에서 영원히 데모 조회기를 쓴다.
+    database_url = os.getenv("DIB_DATABASE_URL", "").strip()
+    if not database_url:
         log.warning("DIB_DATABASE_URL 이 없어 합성 데이터로 동작합니다 (데모 경매 5건)")
         return InMemoryProvider(demo_candidates(), demo_vectors())
     log.info("실제 DB 에 연결합니다")
-    return PostgresProvider(DATABASE_URL)
+    return PostgresProvider(database_url)
 
 router = APIRouter()
 _state: dict[str, object] = {}

@@ -102,6 +102,13 @@ class BidAnomalyCallback(Spec):
 class RecommendationRequest(Spec):
     job_id: str
     member_id: int
+    scope: Literal["ALL", "LIVE", "GENERAL"] = Field(
+        "ALL",
+        description=(
+            "추천 후보 범위. `GENERAL`은 일반 경매, `LIVE`는 라이브에 편성된 경매, "
+            "`ALL`은 전체 진행 중 경매다"
+        ),
+    )
     behavior_window: Any | None = Field(
         None,
         description=(

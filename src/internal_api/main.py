@@ -315,6 +315,11 @@ def _run_recommendation(req: RecommendationRequest, cfg: RecoConfig, provider) -
             _release(req.job_id)
             return
 
+        # 홈은 일반 경매 카드와 라이브 방송 카드를 별도 목록으로 노출한다.
+        # 두 후보군을 섞어 점수화한 뒤 나누면 한쪽 지표가 다른 쪽 순위를 왜곡하므로
+        # 요청한 범위 안에서만 백분위와 최종 점수를 계산한다.
+        candidates = reco_app._by_scope(candidates, req.scope)
+
         # 후보를 지정해 왔으면 그 안에서만 고른다. 백엔드가 이미 노출 정책으로
         # 걸러 낸 목록일 수 있으므로 우리가 임의로 넓히지 않는다.
         if req.candidate_auction_ids:

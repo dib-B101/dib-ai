@@ -48,15 +48,15 @@ W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 # **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
 # 판정은 데모 경매 3건만 아는 상태가 되어, 실제 경매를 물어보면 "없는 경매" 로
 # 답한다. 조용히 틀리느니 뜨지 않는 편이 낫다.
-DATABASE_URL = os.getenv("DIB_DATABASE_URL", "").strip()
-
-
 def _make_provider() -> InputProvider:
-    if not DATABASE_URL:
+    # serve:app은 모듈을 먼저 import하고 lifespan에서 `.env`를 읽는다. 환경값을
+    # import 시점에 고정하면 `.env`의 실제 DB 설정을 보지 못하고 데모로 뜬다.
+    database_url = os.getenv("DIB_DATABASE_URL", "").strip()
+    if not database_url:
         log.warning("DIB_DATABASE_URL 이 없어 합성 데이터로 동작합니다 (데모 경매 3건)")
         return InMemoryProvider(demo_data())
     log.info("실제 DB 에 연결합니다")
-    return PostgresProvider(DATABASE_URL)
+    return PostgresProvider(database_url)
 
 
 # 라우터로 분리해 두면 검수 API 와 한 서버에 합쳐 띄울 수 있다 (src/serve.py).

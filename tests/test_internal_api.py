@@ -79,6 +79,7 @@ def reco_request(**over) -> dict:
     return {
         "jobId": "job-r1",
         "memberId": 77,
+        "scope": "ALL",
         "behaviorWindow": {"days": 30},
         "candidateAuctionIds": [],
         "callbackUrl": "https://backend.test/api/v1/internal/callbacks/ai/recommendations",
@@ -340,6 +341,38 @@ def test_candidate_ids_restrict_the_result(client, sent):
     body = json.loads(sent[0]["body"])
 
     assert [i["auctionId"] for i in body["items"]] == [20003]
+
+
+def test_recommendation_scope_filters_before_ranking(client, sent):
+    """일반 홈 추천에 라이브 편성 경매가 섞이면 안 된다."""
+    post_signed(
+        client,
+        RECOMMENDATIONS,
+        reco_request(jobId="job-general", scope="GENERAL"),
+    )
+    general_ids = [i["auctionId"] for i in json.loads(sent[0]["body"])["items"]]
+
+    post_signed(
+        client,
+        RECOMMENDATIONS,
+        reco_request(jobId="job-live", scope="LIVE"),
+    )
+    live_ids = [i["auctionId"] for i in json.loads(sent[1]["body"])["items"]]
+
+    assert set(general_ids) <= {20001, 20004}
+    assert set(live_ids) <= {20002, 20003}
+    assert general_ids and live_ids
+
+
+def test_invalid_recommendation_scope_is_rejected(client):
+    response = post_signed(
+        client,
+        RECOMMENDATIONS,
+        reco_request(jobId="job-bad-scope", scope="UNKNOWN"),
+    )
+
+    assert response.status_code == 400
+    assert "INVALID_PAYLOAD" in response.json()["detail"]
 
 
 def test_ended_auction_is_excluded_even_if_requested(client, sent):

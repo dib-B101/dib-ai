@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from fastapi.testclient import TestClient
@@ -77,7 +78,7 @@ def test_ranking_runs_on_provider_output(monkeypatch):
 
     # DB 가 주는 것과 같은 형태 — 시간대 없는 지역 시각. 진행 중이어야 하므로
     # 지금을 기준으로 잡는다.
-    started = datetime.now()
+    started = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     rows = [
         row(started_at=started, ended_at=started + timedelta(hours=1)),
         row(auction_id=11, started_at=started, ended_at=started + timedelta(hours=1)),
