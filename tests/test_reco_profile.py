@@ -166,6 +166,28 @@ def test_seen_includes_negatively_weighted_items():
     assert 2 in profile.seen
 
 
+def test_impression_does_not_mark_an_item_as_seen():
+    """**노출은 행동이 아니다.** 목록에 떴다는 이유로 다시 안 보여주면 안 된다.
+
+    `SCROLL_PASS` 와의 차이가 이 테스트의 요점이다. 스크롤로 지나친 것은 사용자가
+    그 자리에 있었고 넘겼다는 뜻이지만, 노출은 **화면 아래쪽에 렌더링됐을 뿐**
+    사용자가 봤는지조차 모른다. 둘을 같이 취급하면 한 번 실린 적 있는 상품이
+    영영 추천에서 사라진다.
+    """
+    profile = build_profile(1, [event("BID", 1), event("IMPRESSION", 3)], STORE, NOW)
+
+    assert profile is not None
+    assert 3 not in profile.seen, "노출만 된 상품이 추천에서 빠졌다"
+
+
+def test_impression_only_item_stays_recommendable(cfg):
+    """노출만 된 상품은 후보로 살아 있어야 한다. seen 제외의 실제 효과다."""
+    profile = build_profile(1, [event("BID", 1), event("IMPRESSION", 2)], STORE, NOW)
+    scores = affinity(profile, [LAPTOP, FRIDGE], cfg.similarity_text_weight)
+
+    assert 2 in scores, "노출됐다는 이유로 추천 후보에서 빠졌다"
+
+
 def test_affinity_ranks_similar_items_higher(cfg):
     """휴대폰에 관심을 보였으면 노트북이 냉장고보다 위여야 한다."""
     profile = build_profile(1, [event("BID", 1)], STORE, NOW)
