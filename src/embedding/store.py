@@ -92,6 +92,31 @@ WHERE deleted_at IS NULL
 """
 
 
+# 우리가 쓰는 벡터 컬럼. **백엔드 마이그레이션이 만드는 것이 아니다.**
+#
+# `product` 테이블은 백엔드 것이고, 백엔드 엔티티는 `embedding` 한 컬럼만 본다.
+# 이 두 개는 `scripts/split_embedding_columns.sql` 로 우리가 얹는다. 그래서
+# **백엔드가 DB 를 다시 만들면 조용히 사라진다.**
+#
+# 사라졌을 때가 문제다. 추천은 예외를 내지 않고 인기순으로 떨어지므로 화면이
+# 멀쩡해 보인다. 배치도 `UPDATE ... SET text_embedding` 에서야 터지는데, 그때는
+# 이미 임베딩을 다 계산한 뒤다. 그래서 쓰기 전에 먼저 확인한다.
+REQUIRED_COLUMNS = ("text_embedding", "image_embedding")
+
+COLUMNS_SQL = """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = 'product'
+  AND column_name = ANY(%(names)s)
+"""
+
+
+def missing_columns(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    """없는 벡터 컬럼. 전부 있으면 빈 튜플."""
+    found = {r["column_name"] for r in rows}
+    return tuple(name for name in REQUIRED_COLUMNS if name not in found)
+
+
 @dataclass(frozen=True, slots=True)
 class PendingProduct:
     """임베딩해야 할 상품 1건."""

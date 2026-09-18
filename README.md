@@ -17,12 +17,12 @@ DIB 시스템의 AI 컴포넌트. 이상거래 탐지, 상품 검수, 개인화 
 | 상품 검수 — 2차 AI 검수 | 구현 완료, 실호출 미검증 | `src/moderation/llm.py` |
 | 상품 검수 — HTTP API | 구현 완료 | `src/moderation_api/` |
 | 추천 — 인기순 (STEP 1) | 구현 완료 | `src/reco/`, `src/reco_api/` |
-| 추천 — 상품 임베딩 (STEP 2) | 구현 완료, DB 컬럼 대기 | `src/embedding/` |
-| 추천 — 유사 상품 (STEP 3) | 구현 완료, DB 컬럼 대기 | `src/reco/similarity.py` |
+| 추천 — 상품 임베딩 (STEP 2) | 구현 완료 (컬럼 추가 SQL 포함) | `src/embedding/` |
+| 추천 — 유사 상품 (STEP 3) | 구현 완료 (컬럼 추가 SQL 포함) | `src/reco/similarity.py` |
 | 백엔드 연동 (명세 92~95) | 구현 완료, HMAC 규약 합의 대기 | `src/internal_api/` |
 | 탐지 — 실DB 조회 | 구현 완료, 접속 정보 대기 | `src/fraud_api/queries.py` |
-| 추천 — 실DB 조회 | 후보 완료 · 벡터는 컬럼 분리 대기 | `src/reco_api/queries.py` |
-| 임베딩 배치 | 구현 완료, 컬럼 분리 대기 | `scripts/embed_products.py` |
+| 추천 — 실DB 조회 | 구현 완료 (컬럼 추가 SQL 포함) | `src/reco_api/queries.py` |
+| 임베딩 배치 | 구현 완료 (없으면 실행 전 멈춤) | `scripts/embed_products.py` |
 | 추천 — 개인화 (STEP 4·5) | 구현 완료, 로그 대기 | `src/reco/profile.py` |
 
 ## 폴더 구조
@@ -1068,6 +1068,33 @@ GRANT UPDATE (text_embedding, image_embedding) ON product TO ai_user;
 ```
 
 두 컬럼 말고는 아무것도 쓰지 않는다. 그 사실을 테스트로 고정해 두었다.
+
+### 벡터 컬럼은 우리가 얹는다
+
+백엔드 마이그레이션(`V2__initial_schema.sql:52`)은 `embedding vector(768)` 한 컬럼이다.
+우리는 텍스트 1024차원 · 이미지 768차원을 따로 쓰므로 자리가 맞지 않는다.
+
+**백엔드에 컬럼을 쪼개 달라고 할 필요는 없다.** Hibernate `ddl-auto: validate` 는
+엔티티에 매핑된 컬럼이 DB 에 있는지만 보고, **DB 에 컬럼이 더 있는 것은 검사하지
+않는다.** 우리 컬럼을 옆에 추가하면 백엔드는 영향을 받지 않는다.
+
+```bash
+docker exec -i dib-postgres psql -U postgres -d dib < scripts/split_embedding_columns.sql
+```
+
+`embedding` 은 **드롭하지 않는다.** 백엔드 `Product.java:51` 이 이 컬럼을 매핑하므로,
+지우면 스키마 검증에서 백엔드가 부팅을 거부한다.
+
+### 컬럼이 사라지면 시끄럽게 멈춘다
+
+우리가 얹은 컬럼이므로 **백엔드가 DB 를 다시 만들면 조용히 없어진다.** 그때 추천은
+예외를 내지 않고 인기순으로 떨어져 화면이 멀쩡해 보인다.
+
+그래서 배치는 **모델을 올리기 전에** 컬럼을 확인하고, 없으면 무엇을 실행하면 되는지
+알려주고 멈춘다. 확인을 뒤로 미루면 수백 건을 인코딩한 뒤 첫 `UPDATE` 에서
+`column does not exist` 로 터지는데, 그 메시지는 할 일을 알려주지 않는다.
+
+`scripts/check_db.py` 도 같은 항목을 본다. 여기서 빨간불이 안 켜지면 아무도 모른다.
 
 ## 무엇을 임베딩하나
 

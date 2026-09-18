@@ -61,6 +61,28 @@ def connect(dsn: str):
     return psycopg.connect(dsn, row_factory=dict_row)
 
 
+def require_columns(conn) -> None:
+    """벡터 컬럼이 없으면 **무엇을 실행하면 되는지 알려주고** 멈춘다.
+
+    이 두 컬럼은 백엔드 마이그레이션이 만들지 않는다. 우리가 얹는 것이라
+    **백엔드가 DB 를 다시 만들면 조용히 사라진다.**
+
+    확인하지 않으면 임베딩을 전부 계산한 뒤 첫 `UPDATE` 에서 터진다. 모델을 올리고
+    수백 건을 인코딩한 시간이 통째로 날아가고, 오류 메시지도 "column does not
+    exist" 라 무엇을 해야 하는지 알려주지 않는다.
+    """
+    with conn.cursor() as cur:
+        cur.execute(store.COLUMNS_SQL, {"names": list(store.REQUIRED_COLUMNS)})
+        missing = store.missing_columns(cur.fetchall())
+    if missing:
+        raise SystemExit(
+            f"product 에 {' · '.join(missing)} 이(가) 없습니다.\n"
+            "이 컬럼은 백엔드가 아니라 우리가 추가합니다. 아래를 실행하십시오.\n\n"
+            "    docker exec -i dib-postgres psql -U postgres -d dib"
+            " < scripts/split_embedding_columns.sql\n"
+        )
+
+
 def fetch_pending(conn, limit: int, force: bool):
     with conn.cursor() as cur:
         cur.execute(
@@ -157,6 +179,9 @@ def main() -> int:
 
     conn = connect(dsn)
     try:
+        # 모델을 올리기 전에 확인한다. 뒤로 미루면 수백 건을 인코딩한 뒤에야 터진다.
+        require_columns(conn)
+
         if not (args.dry_run or args.no_reclaim):
             wiped = reclaim_stale(conn)
             if wiped:
