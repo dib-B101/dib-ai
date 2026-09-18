@@ -22,6 +22,16 @@ class RecoConfig:
     popularity: Mapping[str, float]
     competition: Mapping[str, float]
     weights: Mapping[str, float]
+    similarity_weight: float
+    similarity_text_weight: float
+
+    # 개인화 (STEP 5). 행동 로그가 없으면 쓰이지 않는다.
+    personalization_weight: float
+    half_life_days: float
+    lookback_days: int
+    max_events: int
+    event_weights: Mapping[str, float]
+
     limit: int
 
     @classmethod
@@ -35,6 +45,17 @@ class RecoConfig:
             popularity=dict(raw.get("popularity", {})),
             competition=dict(raw.get("competition", {})),
             weights=dict(raw.get("weights", {})),
+            similarity_weight=float(raw.get("similarity", {}).get("weight", 0.5)),
+            similarity_text_weight=float(raw.get("similarity", {}).get("text", 0.6)),
+            personalization_weight=float(
+                raw.get("personalization", {}).get("weight", 0.4)
+            ),
+            half_life_days=float(
+                raw.get("personalization", {}).get("half_life_days", 14)
+            ),
+            lookback_days=int(raw.get("personalization", {}).get("lookback_days", 90)),
+            max_events=int(raw.get("personalization", {}).get("max_events", 500)),
+            event_weights=dict(raw.get("personalization", {}).get("events", {})),
             limit=int(raw.get("limit", 50)),
         )
         cfg.validate()
@@ -45,6 +66,15 @@ class RecoConfig:
 
         가중치 오타 하나로 추천 순서가 조용히 망가지면 원인을 찾는 데 훨씬 오래 걸린다.
         """
+        for name, value in (
+            ("similarity.weight", self.similarity_weight),
+            ("similarity.text", self.similarity_text_weight),
+            ("personalization.weight", self.personalization_weight),
+        ):
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} 는 0~1 이어야 합니다: {value}")
+        if self.half_life_days <= 0:
+            raise ValueError(f"half_life_days 는 양수여야 합니다: {self.half_life_days}")
         if self.tau_seconds <= 0:
             raise ValueError(f"tau_seconds 는 양수여야 합니다: {self.tau_seconds}")
 

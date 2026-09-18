@@ -27,6 +27,11 @@ from typing import Mapping, Sequence
 from .features import bidding_ratio, ordered_bids
 from .schema import Auction, Bid, CorpusStats, DetectionInput, HistoryEntry
 
+# 서빙 피처 계산식의 버전. 명세 93번 콜백의 `featureVersion` 으로 나간다.
+# **식을 바꾸면 반드시 올린다.** 같은 이름의 피처가 다른 뜻을 갖게 되면, 과거에
+# 저장된 fraud_detection 행을 지금 기준으로 해석해 틀린 결론을 내게 된다.
+FEATURE_VERSION = "dib-fv1"
+
 # 원 논문이 "적극 참여" 를 가르는 기준. 한두 번 찔러본 경매를 낙찰률 분모에서 뺀다.
 ACTIVE_PARTICIPATION_RATIO = 0.1
 

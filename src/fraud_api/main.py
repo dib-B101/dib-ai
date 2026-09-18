@@ -31,7 +31,7 @@ from fraud_ml.predict import FraudModel, ModelNotAvailable
 
 from .demo import demo_data
 from .models import BidderRisk, DetectResponse, DetectRequest, HealthResponse
-from .provider import InMemoryProvider, InputProvider, ProviderError
+from .provider import InMemoryProvider, InputProvider, PostgresProvider, ProviderError
 
 log = logging.getLogger("fraud_api")
 
@@ -43,6 +43,22 @@ log = logging.getLogger("fraud_api")
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 
+# DB 가 설정되어 있으면 실제 조회를, 아니면 합성 데이터를 쓴다.
+#
+# **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
+# 판정은 데모 경매 3건만 아는 상태가 되어, 실제 경매를 물어보면 "없는 경매" 로
+# 답한다. 조용히 틀리느니 뜨지 않는 편이 낫다.
+DATABASE_URL = os.getenv("DIB_DATABASE_URL", "").strip()
+
+
+def _make_provider() -> InputProvider:
+    if not DATABASE_URL:
+        log.warning("DIB_DATABASE_URL 이 없어 합성 데이터로 동작합니다 (데모 경매 3건)")
+        return InMemoryProvider(demo_data())
+    log.info("실제 DB 에 연결합니다")
+    return PostgresProvider(DATABASE_URL)
+
+
 # 라우터로 분리해 두면 검수 API 와 한 서버에 합쳐 띄울 수 있다 (src/serve.py).
 router = APIRouter()
 
@@ -52,7 +68,7 @@ _state: dict[str, object] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _state["config"] = RuleConfig.load()
-    _state["provider"] = InMemoryProvider(demo_data())
+    _state["provider"] = _make_provider()
     cfg: RuleConfig = _state["config"]  # type: ignore[assignment]
     log.info(
         "규칙 엔진 준비 완료 — config=%s, 활성 규칙 %d개",
@@ -105,6 +121,74 @@ def get_provider() -> InputProvider:
     return provider  # type: ignore[return-value]
 
 
+def score_bidders(
+    inp, cfg: RuleConfig, model: "FraudModel | None"
+) -> tuple[list[BidderRisk], dict[str, float], dict[int, str], str | None, datetime]:
+    """규칙 + 모델 점수를 합쳐 입찰자별 위험도를 만든다.
+
+    두 엔드포인트(동기 `/internal/fraud/detect`, 비동기 명세 92번)가 같은 계산을
+    쓰도록 함수로 뺀다. **점수가 경로마다 다르면 관리자가 보는 숫자와 저장된 숫자가
+    어긋난다.**
+
+    `ml_features` 원값도 함께 돌려준다 — 명세 93번 콜백이 피처를 그대로 요구한다.
+    """
+    result = detect(inp, cfg)
+
+    # 피처는 **모델 가중치와 무관하게 계산한다.** W_ML 이 0 이어도 백엔드는 이 값을
+    # fraud_detection 에 저장하고 관리자 화면에서 근거로 본다. 점수에 안 쓴다는 것과
+    # 값을 안 남긴다는 것은 다르다.
+    #
+    # 코퍼스 기준값이 없으면 피처를 만들 수 없어 None 이 된다. 그 경우 규칙 점수만 쓴다.
+    features: dict[int, dict[str, float]] = {
+        r.member_id: f
+        for r in result.results
+        if (f := ml_features.compute(inp, r.member_id)) is not None
+    }
+
+    # 모델 점수는 한 번에 계산한다. 입찰자마다 부르면 경매 하나에 수십 번이 된다.
+    ml_scores: dict[int, float | None] = {r.member_id: None for r in result.results}
+    if model is not None and W_ML > 0:
+        if features:
+            try:
+                for member_id, score in zip(
+                    features, model.score_many(list(features.values()))
+                ):
+                    ml_scores[member_id] = score
+            except Exception:
+                # 모델이 터져도 규칙 점수는 나가야 한다.
+                log.exception("모델 추론 실패 auction_id=%s", inp.auction.auction_id)
+
+    results = []
+    for r in result.results:
+        ml = ml_scores[r.member_id]
+        risk = combine(r.rule_score, ml, W_RULE, W_ML)
+        results.append(
+            BidderRisk(
+                member_id=r.member_id,
+                risk_score=round(risk, 4),
+                rule_score=round(r.rule_score, 4),
+                ml_score=round(ml, 4) if ml is not None else None,
+                band=cfg.band_of(risk),
+                reasons=r.reasons(),
+                detail={
+                    **r.to_detail(),
+                    "rule_config_version": result.rule_config_version,
+                    # 명세 93번 콜백이 피처 원값을 요구한다. 없으면 빈 dict 다.
+                    "ml_features": features.get(r.member_id, {}),
+                },
+            )
+        )
+
+    weights = {"w_rule": W_RULE, "w_ml": W_ML}
+    return (
+        results,
+        weights,
+        dict(result.skipped_bidders),
+        result.auction_error,
+        result.as_of,
+    )
+
+
 @router.get("/health", response_model=HealthResponse, tags=["ops"])
 def health(cfg: RuleConfig = Depends(get_config)) -> HealthResponse:
     """인프라가 감시할 헬스체크. 설정이 로드되고 규칙이 하나라도 켜져 있어야 ok 다."""
@@ -144,54 +228,18 @@ def detect_auction(
             status.HTTP_404_NOT_FOUND, f"경매를 찾을 수 없습니다: {req.auction_id}"
         )
 
-    result = detect(inp, cfg)
     model: FraudModel | None = _state.get("model")  # type: ignore[assignment]
-
-    # 모델 점수는 한 번에 계산한다. 입찰자마다 부르면 경매 하나에 수십 번이 된다.
-    # 코퍼스 기준값이 없으면 피처를 못 만들므로 None 이 되고, 그 경우 규칙 점수만 쓴다.
-    ml_scores: dict[int, float | None] = {r.member_id: None for r in result.results}
-    if model is not None and W_ML > 0:
-        rows = {
-            r.member_id: f
-            for r in result.results
-            if (f := ml_features.compute(inp, r.member_id)) is not None
-        }
-        if rows:
-            try:
-                for member_id, score in zip(rows, model.score_many(list(rows.values()))):
-                    ml_scores[member_id] = score
-            except Exception:
-                # 모델이 터져도 규칙 점수는 나가야 한다.
-                log.exception("모델 추론 실패 auction_id=%s", req.auction_id)
-
-    results = []
-    for r in result.results:
-        ml = ml_scores[r.member_id]
-        risk = combine(r.rule_score, ml, W_RULE, W_ML)
-        results.append(
-            BidderRisk(
-                member_id=r.member_id,
-                risk_score=round(risk, 4),
-                rule_score=round(r.rule_score, 4),
-                ml_score=round(ml, 4) if ml is not None else None,
-                band=cfg.band_of(risk),
-                reasons=r.reasons(),
-                detail={
-                    **r.to_detail(),
-                    "rule_config_version": result.rule_config_version,
-                },
-            )
-        )
+    results, weights, skipped, auction_error, as_of = score_bidders(inp, cfg, model)
 
     return DetectResponse(
-        auction_id=result.auction_id,
-        as_of=result.as_of,
-        rule_config_version=result.rule_config_version,
+        auction_id=inp.auction.auction_id,
+        as_of=as_of,
+        rule_config_version=cfg.version,
         model_version=model.version if model is not None and W_ML > 0 else None,
-        weights={"w_rule": W_RULE, "w_ml": W_ML},
+        weights=weights,
         results=results,
-        skipped_bidders=dict(result.skipped_bidders),
-        auction_error=result.auction_error,
+        skipped_bidders=skipped,
+        auction_error=auction_error,
     )
 
 

@@ -33,8 +33,11 @@ class RecoResponse(BaseModel):
     strategy: str = Field(
         ...,
         description=(
-            "어떤 방식으로 뽑았는지. `popularity` = 인기순(개인화 없음). "
-            "개인화가 가동되면 값이 바뀐다"
+            "어떤 방식으로 뽑았는지. `popularity` = 인기순(개인화 없음), "
+            "`similar` = 유사 상품. **유사 상품을 요청했는데 `popularity` 가 오면 "
+            "폴백된 것이다** — 기준 상품의 임베딩이 아직 없다는 뜻이며, 추천을 아예 "
+            "내보내지 않는 것보다 낫다고 판단해 인기순으로 대체했다. 개인화가 "
+            "가동되면 값이 또 늘어난다"
         ),
         examples=["popularity"],
     )
@@ -44,8 +47,11 @@ class RecoResponse(BaseModel):
     items: list[RecoItem] = Field(default_factory=list)
     excluded: dict[str, int] = Field(
         default_factory=dict,
-        description="후보에서 제외된 사유와 건수. 예: 이미 종료된 경매",
-        examples=[{"ended": 3}],
+        description=(
+            "후보에서 제외된 사유와 건수. `ended` = 이미 종료된 경매, "
+            "`no_vector` = 임베딩이 아직 없어 유사도를 잴 수 없는 상품"
+        ),
+        examples=[{"ended": 3, "no_vector": 12}],
     )
 
 

@@ -27,10 +27,18 @@ class Candidate:
     auction_time: int       # 초. 생성 시 확정되며 연장해도 바뀌지 않는다
     ended_at: datetime | None = None   # 연장을 반영한 현재 예정 종료시각
 
+    # 라이브 방송 중 진행되는 경매면 그 방송 id. 일반 경매는 None.
+    # 명세 108번이 라이브와 일반을 나눠 달라고 해서 후보에 실어 둔다.
+    live_broadcast_id: int | None = None
+
     view_count: int = 0
     bookmark_count: int = 0
     bid_count: int = 0
     bidder_count: int = 0
+
+    @property
+    def is_live(self) -> bool:
+        return self.live_broadcast_id is not None
 
     def remaining_seconds(self, now: datetime) -> float:
         """남은 시간(초). 이미 끝났으면 0 이하가 나온다.
@@ -52,6 +60,11 @@ class Scored:
     popularity: float
     competition: float
     remaining_seconds: float
+    similarity: float = 0.0   # 유사 상품 추천일 때만. 인기순에서는 0
+
+    # 라이브 방송 중 경매면 그 방송 id. 명세 108 이 라이브와 일반을 나눠 달라고 해서
+    # 순위 결과에 실어 보낸다 — 백엔드가 다시 조회하지 않고 가를 수 있다.
+    live_broadcast_id: int | None = None
 
     def breakdown(self) -> dict[str, Any]:
         """왜 이 순위인지 설명하는 값들.
@@ -64,6 +77,8 @@ class Scored:
             "popularity": round(self.popularity, 4),
             "competition": round(self.competition, 4),
             "remaining_seconds": round(self.remaining_seconds, 1),
+            "similarity": round(self.similarity, 4),
+            "live_broadcast_id": self.live_broadcast_id,
         }
 
 
@@ -74,3 +89,21 @@ class RecoResult:
     strategy: str                     # popularity | personalized ...
     items: tuple[Scored, ...] = ()
     excluded: dict[str, int] = field(default_factory=dict)   # 사유 -> 건수
+
+
+@dataclass(frozen=True, slots=True)
+class ProductVector:
+    """상품 1건의 임베딩. `product_embedding` 테이블 한 행에 대응한다.
+
+    키가 `product_id` 가 아니라 `auction_id` 인 이유는 추천의 단위가 **진행 중인
+    경매**이기 때문이다. 유찰 후 재등록되면 같은 상품에 여러 경매가 붙는데,
+    벡터는 같아도 마감 시각과 인기 지표가 달라 서로 다른 후보로 다뤄야 한다.
+
+    `image` 는 없을 수 있다. 사진을 못 읽었거나 아직 배치가 돌지 않은 상품인데,
+    **0 벡터로 채우지 않는다** — 0 은 "닮지 않음" 으로 읽혀 사진이 없다는 이유만으로
+    순위가 밀린다. 없으면 없는 채로 두고 텍스트만으로 판단한다.
+    """
+
+    auction_id: int
+    text: tuple[float, ...]                    # BGE-M3 1024차원, L2 정규화됨
+    image: tuple[float, ...] | None = None     # SigLIP 768차원, L2 정규화됨

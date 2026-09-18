@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 from .config import RecoConfig
 from .schema import Candidate, RecoResult, Scored
@@ -87,11 +87,20 @@ def rank(
     now: datetime,
     limit: int | None = None,
     boost: Callable[[Candidate], float] | None = None,
+    similarity: Mapping[int, float] | None = None,
+    strategy: str = "popularity",
+    similarity_weight: float | None = None,
 ) -> RecoResult:
-    """인기순 추천 목록을 만든다.
+    """추천 목록을 만든다.
 
-    `boost` 는 개인화 점수를 더할 자리다. 지금은 쓰지 않지만, STEP 5 에서 유사도를
-    여기에 끼워 넣으면 **랭킹 코드를 다시 쓰지 않아도 된다.**
+    `similarity` 를 주면 **경매 특성 점수와 섞는다.**
+
+        최종 = w_sim × 유사도 + (1 − w_sim) × (마감임박 · 인기도 · 경쟁도)
+
+    둘을 섞는 이유는 유사하기만 하고 아무도 안 보는 경매를 위로 올리면 안 되기
+    때문이다. 반대로 인기만 보면 취향과 무관한 상품이 올라온다.
+
+    `boost` 는 개인화(STEP 5)를 위한 자리다. 랭킹 코드를 다시 쓰지 않으려고 둔다.
 
     이미 끝난 경매는 제외한다. 남은 시간이 0 이하면 마감 임박도가 최대가 되어
     **종료된 경매가 목록 맨 위에 올라오는 사고**가 난다.
@@ -105,31 +114,51 @@ def rank(
         alive.append(c)
 
     if not alive:
-        return RecoResult(now, cfg.version, "popularity", (), excluded)
+        return RecoResult(now, cfg.version, strategy, (), excluded)
 
     pops = _weighted_percentile(alive, dict(cfg.popularity))
     comps = _weighted_percentile(alive, dict(cfg.competition))
 
     w = cfg.weights
+
+    # 유사 상품과 개인화가 비중을 다르게 쓴다. 유사 상품은 "지금 이걸 보고 있다" 는
+    # 확실한 신호지만, 관심 프로필은 과거 행동에서 추정한 값이라 덜 확실하다.
+    w_sim = 0.0
+    if similarity:
+        w_sim = cfg.similarity_weight if similarity_weight is None else similarity_weight
+
     scored: list[Scored] = []
     for i, c in enumerate(alive):
         remaining = c.remaining_seconds(now)
         u = urgency(remaining, cfg.tau_seconds)
-        score = (
+        base = (
             w.get("urgency", 0.0) * u
             + w.get("popularity", 0.0) * pops[i]
             + w.get("competition", 0.0) * comps[i]
         )
+        sim = (similarity or {}).get(c.auction_id, 0.0)
+        score = w_sim * sim + (1 - w_sim) * base
         if boost is not None:
             score += boost(c)
-        scored.append(Scored(c.auction_id, score, u, pops[i], comps[i], remaining))
+        scored.append(
+            Scored(
+                c.auction_id,
+                score,
+                u,
+                pops[i],
+                comps[i],
+                remaining,
+                similarity=sim,
+                live_broadcast_id=c.live_broadcast_id,
+            )
+        )
 
     # 점수 내림차순. 동점은 auction_id 오름차순으로 고정해 결과를 재현 가능하게 둔다.
     scored.sort(key=lambda s: (-s.score, s.auction_id))
     return RecoResult(
         now,
         cfg.version,
-        "popularity",
+        strategy,
         tuple(scored[: limit or cfg.limit]),
         excluded,
     )
