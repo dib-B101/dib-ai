@@ -89,6 +89,7 @@ def rank(
     boost: Callable[[Candidate], float] | None = None,
     similarity: Mapping[int, float] | None = None,
     strategy: str = "popularity",
+    similarity_weight: float | None = None,
 ) -> RecoResult:
     """추천 목록을 만든다.
 
@@ -119,7 +120,12 @@ def rank(
     comps = _weighted_percentile(alive, dict(cfg.competition))
 
     w = cfg.weights
-    w_sim = cfg.similarity_weight if similarity else 0.0
+
+    # 유사 상품과 개인화가 비중을 다르게 쓴다. 유사 상품은 "지금 이걸 보고 있다" 는
+    # 확실한 신호지만, 관심 프로필은 과거 행동에서 추정한 값이라 덜 확실하다.
+    w_sim = 0.0
+    if similarity:
+        w_sim = cfg.similarity_weight if similarity_weight is None else similarity_weight
 
     scored: list[Scored] = []
     for i, c in enumerate(alive):

@@ -11,7 +11,7 @@ import logging
 from datetime import datetime
 from typing import Mapping, Protocol, Sequence
 
-from reco import Candidate, ProductVector
+from reco import BehaviorEvent, Candidate, ProductVector
 
 from . import queries
 
@@ -30,6 +30,10 @@ class CandidateProvider(Protocol):
     def load_vectors(
         self, auction_ids: Sequence[int]
     ) -> Mapping[int, ProductVector]: ...
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]: ...
 
 
 class InMemoryProvider:
@@ -55,6 +59,12 @@ class InMemoryProvider:
         상태가 아니다. 호출자가 그 차이를 구분할 수 있어야 한다.
         """
         return {i: self._vectors[i] for i in auction_ids if i in self._vectors}
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]:
+        """합성 데이터에는 행동 로그가 없다. 개인화는 인기순으로 떨어진다."""
+        return ()
 
 
 class PostgresProvider:
@@ -138,5 +148,28 @@ class PostgresProvider:
             raise
         except Exception as exc:
             raise ProviderError(f"임베딩 조회 실패: {exc}") from exc
+        finally:
+            conn.close()
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]:
+        """`member_event` 에서 이 회원의 최근 행동을 읽는다.
+
+        **조회 실패를 예외로 올리지 않는다.** 개인화는 있으면 좋은 것이지 없으면
+        추천이 안 나가는 것이 아니다. 로그를 못 읽으면 빈 목록을 돌려주고 호출자가
+        인기순으로 떨어지게 둔다 — 추천 전체가 503 이 되는 편이 훨씬 나쁘다.
+        """
+        conn = self._connect()
+        try:
+            with conn, conn.cursor() as cur:
+                cur.execute(
+                    queries.EVENTS_SQL,
+                    {"member_id": member_id, "since": since, "limit": limit},
+                )
+                return queries.to_events(cur.fetchall())
+        except Exception:
+            log.warning("행동 로그 조회 실패 member_id=%s — 인기순으로 내보냅니다", member_id)
+            return ()
         finally:
             conn.close()

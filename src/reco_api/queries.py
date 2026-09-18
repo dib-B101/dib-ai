@@ -35,7 +35,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from dbtime import to_utc
-from reco import Candidate, ProductVector
+from reco import BehaviorEvent, Candidate, ProductVector
 
 # 검수를 통과하지 못한 상품 상태. 이 목록에 있으면 추천에 노출하지 않는다.
 #
@@ -83,6 +83,42 @@ JOIN product p ON p.product_id = a.product_id
 WHERE a.auction_id = ANY(%(auction_ids)s)
   AND p.text_embedding IS NOT NULL
 """
+
+
+# 사용자 행동 로그 (개인화용).
+#
+# **컬럼명이 `occured_at` 이다.** `occurred_at` 이 아니다 — 백엔드 스키마의 오타이고
+# 엔티티에도 `@Column(name = "occured_at")` 로 그대로 매핑돼 있다. 맞춤법을 고치면
+# 조회가 깨지므로 스키마를 따른다.
+#
+# `auction_id` 가 없는 이벤트(검색어 입력 등)는 뺀다. 어떤 상품에 대한 관심인지
+# 특정할 수 없으면 프로필에 넣을 벡터가 없다.
+EVENTS_SQL = """
+SELECT event_type, auction_id, occured_at
+FROM member_event
+WHERE member_id = %(member_id)s
+  AND auction_id IS NOT NULL
+  AND occured_at >= %(since)s
+ORDER BY occured_at DESC
+LIMIT %(limit)s
+"""
+
+
+def to_events(rows: Sequence[Mapping[str, Any]]) -> tuple[BehaviorEvent, ...]:
+    """행동 로그를 프로필 계산용 자료구조로.
+
+    시각을 UTC 로 올린다. 감쇠 계산이 `datetime.now(timezone.utc)` 와 빼기를 하므로
+    맞추지 않으면 그대로 터진다 — 후보 조회에서 이미 한 번 겪은 일이다.
+    """
+    return tuple(
+        BehaviorEvent(
+            event_type=str(r["event_type"]),
+            auction_id=r["auction_id"],
+            occurred_at=to_utc(r["occured_at"]),
+        )
+        for r in rows
+        if r["auction_id"] is not None and r["occured_at"] is not None
+    )
 
 
 def to_candidates(rows: Sequence[Mapping[str, Any]]) -> tuple[Candidate, ...]:
