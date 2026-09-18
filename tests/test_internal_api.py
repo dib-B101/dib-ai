@@ -351,11 +351,18 @@ def test_ended_auction_is_excluded_even_if_requested(client, sent):
 
 
 def test_behavior_window_is_accepted_but_unused(client, sent):
-    """개인화 전이라 무시한다. **거절하면 연동이 깨지므로 받아만 둔다.**"""
+    """조회 구간은 설정이 정한다. 요청값에 따라 추천이 달라지면 안 된다.
+
+    **순서만 비교한다.** 점수에는 남은 시간이 들어가 두 호출 사이에 흐른 시간만큼
+    달라진다 — 그걸 비교하면 느린 날에만 깨지는 테스트가 된다.
+    """
     post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-r2", behaviorWindow=None))
     post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-r3", behaviorWindow={"days": 7}))
 
-    assert json.loads(sent[0]["body"])["items"] == json.loads(sent[1]["body"])["items"]
+    def order(body):
+        return [i["auctionId"] for i in json.loads(body)["items"]]
+
+    assert order(sent[0]["body"]) == order(sent[1]["body"])
 
 
 def test_backend_utc_timestamps_do_not_shift_the_features(client, sent):
