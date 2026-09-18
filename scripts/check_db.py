@@ -87,20 +87,25 @@ def main() -> int:
                 )
                 found = {r["column_name"] for r in cur.fetchall()}
                 if {"text_embedding", "image_embedding"} <= found:
-                    return "컬럼 분리 완료"
-                if "embedding" in found:
-                    raise RuntimeError(
-                        "아직 embedding 한 컬럼입니다 — 백엔드 마이그레이션 대기"
-                    )
-                raise RuntimeError(f"임베딩 컬럼을 찾지 못했습니다: {found or '없음'}")
+                    return "준비됨"
+                raise RuntimeError(
+                    "text_embedding · image_embedding 이 없습니다 "
+                    f"(현재: {', '.join(sorted(found)) or '없음'}) — "
+                    "scripts/split_embedding_columns.sql 을 실행하십시오"
+                )
 
             failures += not check("연결", version)
             failures += not check("pgvector", extension)
 
-            # 컬럼 분리는 백엔드 작업이라 아직 안 돼 있는 것이 정상이다.
-            # **실패로 세지 않되 화면에는 남긴다** — 조용히 넘어가면 "다 됐다" 로
-            # 오해하고, 실패로 세면 백엔드를 기다리는 동안 늘 빨간불이 된다.
+            # 이 컬럼은 **우리가 추가한다.** 백엔드 마이그레이션이 만드는 것이 아니라
+            # `scripts/split_embedding_columns.sql` 이 얹는 것이므로, 없으면 기다릴
+            # 일이 아니라 지금 실행하면 되는 일이다. 그래서 실패로 센다.
+            #
+            # 백엔드가 DB 를 다시 만들면 이 컬럼이 조용히 사라진다. 그때 추천은
+            # 500 이 아니라 인기순으로 떨어져 **화면은 멀쩡해 보인다.** 여기서
+            # 빨간불이 켜지지 않으면 아무도 모른다.
             split_done = check("임베딩 컬럼", columns)
+            failures += not split_done
 
             def counts():
                 cur.execute(

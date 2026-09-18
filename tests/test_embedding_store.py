@@ -171,3 +171,33 @@ def test_reclaimed_rows_are_not_recomputed_in_the_same_run():
     """
     assert "%(skip_status)s" in store.RECLAIM_SQL
     assert "%(skip_status)s" in store.PENDING_SQL
+
+
+# --- 벡터 컬럼 존재 확인 ------------------------------------------------------
+#
+# 이 두 컬럼은 백엔드 마이그레이션이 만들지 않는다. 우리가 얹는 것이라 백엔드가
+# DB 를 다시 만들면 조용히 사라지고, 그때 추천은 예외 없이 인기순으로 떨어져
+# **화면이 멀쩡해 보인다.** 쓰기 전에 막는 것이 유일한 방어선이다.
+
+
+def test_missing_columns_reports_what_is_absent():
+    rows = [{"column_name": "text_embedding"}]
+
+    assert store.missing_columns(rows) == ("image_embedding",)
+
+
+def test_missing_columns_is_empty_when_ready():
+    rows = [{"column_name": "text_embedding"}, {"column_name": "image_embedding"}]
+
+    assert store.missing_columns(rows) == ()
+
+
+def test_missing_columns_reports_both_on_a_fresh_backend_schema():
+    """백엔드가 Flyway 로 DB 를 다시 만든 직후의 상태다. `embedding` 만 있다."""
+    assert store.missing_columns([{"column_name": "embedding"}]) == store.REQUIRED_COLUMNS
+
+
+def test_required_columns_match_what_the_batch_writes():
+    """확인하는 컬럼과 쓰는 컬럼이 어긋나면 검사가 통과한 뒤 UPDATE 에서 터진다."""
+    for name in store.REQUIRED_COLUMNS:
+        assert name in store.UPDATE_SQL
