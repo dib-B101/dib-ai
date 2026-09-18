@@ -250,8 +250,13 @@ def _run_bid_anomaly(req: BidAnomalyRequest, inp, cfg: RuleConfig) -> None:
             ),
             predicted_label=1 if mine.risk_score >= threshold else 0,
             decision_threshold=threshold,
-            # 모델이 실제로 기여했을 때만 버전을 적는다. W_ML 이 0 이면 점수에
-            # 반영되지 않았는데 버전만 남아, 나중에 "이 모델이 낸 점수" 로 오독된다.
+            # **`ml_score` 를 만든 모델**을 적는다. 섀도 모드(`w_ml=0` 인데 모델은
+            # 도는 상태)에서도 적는다 — 그 점수가 어느 모델에서 나왔는지 모르면
+            # 나중에 두 트랙을 비교할 수 없고, 비교하려고 섀도로 돌리는 것이다.
+            #
+            # 이 콜백 스키마(명세 93)에는 `weights` 자리가 없다. 대신 `rule_score` ·
+            # `ml_score` · `risk_score` 가 따로 담기므로, **`risk_score` 가
+            # `rule_score` 와 같으면 모델은 판정에 안 쓰인 것**으로 읽으면 된다.
             model_version=(
                 model.version
                 if model is not None and mine.ml_score is not None

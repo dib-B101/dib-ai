@@ -43,6 +43,31 @@ log = logging.getLogger("fraud_api")
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# 섀도 모드 — **모델 점수를 계산하되 risk_score 에는 섞지 않는다.**
+#
+# `w_ml=0` 인 채로 모델을 아예 안 부르면, 나중에 가중치를 올릴 때 근거로 삼을 자료가
+# 하나도 없다. "검증되면 켠다" 고만 해 두면 검증할 방법이 없어 영영 못 켠다.
+#
+# 섀도로 돌려 두면 두 트랙이 같은 입찰자를 어떻게 봤는지가 매 경매마다 쌓인다.
+#
+#     rule 0.535  ml 0.538   두 트랙이 같은 결론
+#     rule 0.120  ml 0.810   불일치. 운영자 판정이 붙으면 어느 쪽이 맞았는지 남는다
+#
+# **risk_score 는 한 자리도 바뀌지 않는다** (`combine` 이 `w_ml<=0` 이면 규칙 점수를
+# 그대로 돌려준다). 늘어나는 것은 응답의 `ml_score` 와 그 출처인 `model_version` 뿐이다.
+#
+# 기본값이 켬인 이유는 점수에 영향이 없고 비용도 경매당 수 밀리초이기 때문이다.
+# 끄려면 `FRAUD_ML_SHADOW=false`.
+ML_SHADOW = _flag("FRAUD_ML_SHADOW", True)
+
 # DB 가 설정되어 있으면 실제 조회를, 아니면 합성 데이터를 쓴다.
 #
 # **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
@@ -146,8 +171,11 @@ def score_bidders(
     }
 
     # 모델 점수는 한 번에 계산한다. 입찰자마다 부르면 경매 하나에 수십 번이 된다.
+    #
+    # **가중치가 0 이어도 섀도 모드면 계산한다.** 점수에는 안 섞이지만(`combine` 이
+    # 규칙 점수를 그대로 돌려준다) 두 트랙을 비교할 자료가 그때부터 쌓인다.
     ml_scores: dict[int, float | None] = {r.member_id: None for r in result.results}
-    if model is not None and W_ML > 0:
+    if model is not None and (W_ML > 0 or ML_SHADOW):
         if features:
             try:
                 for member_id, score in zip(
@@ -231,11 +259,20 @@ def detect_auction(
     model: FraudModel | None = _state.get("model")  # type: ignore[assignment]
     results, weights, skipped, auction_error, as_of = score_bidders(inp, cfg, model)
 
+    # **`model_version` 은 `ml_score` 를 만든 모델을 가리킨다.** 점수에 반영됐는지가
+    # 아니라 누가 냈는지다. 섀도 모드에서도 적어야 나중에 "이 점수는 어느 모델이
+    # 낸 것인가" 를 답할 수 있고, 그게 섀도로 모으는 이유다.
+    #
+    # 반영 여부는 `weights.w_ml` 과 `ml_shadow` 가 말한다. 둘을 한 필드로 겸하게
+    # 하면 어느 쪽 뜻인지 읽는 사람마다 달라진다.
+    scored = any(r.ml_score is not None for r in results)
+
     return DetectResponse(
         auction_id=inp.auction.auction_id,
         as_of=as_of,
         rule_config_version=cfg.version,
-        model_version=model.version if model is not None and W_ML > 0 else None,
+        model_version=model.version if model is not None and scored else None,
+        ml_shadow=scored and W_ML <= 0,
         weights=weights,
         results=results,
         skipped_bidders=skipped,

@@ -225,8 +225,13 @@ def test_features_are_sent_even_when_model_weight_is_zero(client, sent):
     assert features["ruleScore"] is not None
 
 
-def test_model_version_is_absent_when_model_did_not_contribute(client, sent):
-    """`mlScore` 가 없는데 버전만 남으면 "이 모델이 낸 점수" 로 오독된다."""
+def test_model_version_tracks_the_ml_score(client, sent):
+    """`modelVersion` 은 **`mlScore` 를 만든 모델**이다. 둘은 같이 있거나 같이 없다.
+
+    섀도 모드(`w_ml=0` 인데 모델은 도는 상태)에서도 버전을 적는다 — 그 점수가 어느
+    모델에서 나왔는지 모르면 나중에 두 트랙을 비교할 수 없고, 비교하려고 모으는
+    것이다. 판정에 반영됐는지는 `riskScore` 가 `ruleScore` 와 같은지로 읽는다.
+    """
     post_signed(client, BID_ANOMALIES, bid_request())
     body = json.loads(sent[0]["body"])
 
