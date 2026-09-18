@@ -121,6 +121,65 @@ def to_events(rows: Sequence[Mapping[str, Any]]) -> tuple[BehaviorEvent, ...]:
     )
 
 
+# 찜은 `member_event` 가 아니라 **`bookmark` 테이블**에 쌓인다.
+#
+# 백엔드가 `member_event` 에 기록하는 이벤트는 현재 `BID` 하나뿐이다. 그런데 찜은
+# 별도 테이블에 이미 저장되고 있고, 우리가 프로필을 만드는 데 필요한 것
+# (`member_id` · `product_id` · `created_at`)이 전부 있다. **백엔드 작업을 기다리지
+# 않고 바로 쓸 수 있는 강한 신호**라 여기서 직접 읽는다.
+#
+# `bookmark` 는 상품 단위인데 프로필은 경매 단위다. 유찰 후 재등록되면 한 상품에
+# 경매가 여러 개 붙으므로 **상품마다 가장 최근 경매 하나**만 쓴다. 벡터는 어느
+# 경매를 골라도 같고(상품이 같으니), 지금 보고 있을 경매는 최신 쪽이다.
+#
+# 주의 두 가지.
+#
+# 이 테이블은 **현재 찜 상태이지 이력이 아니다.** 찜을 해제하면 행이 사라져
+# `UNWATCH` 는 잡히지 않는다. 다만 해제된 건 애초에 안 잡히므로 결과는 같다.
+#
+# **경매가 없는 상품의 찜은 빠진다.** 프로필이 경매 단위라 붙일 `auction_id` 가 없다.
+# 취향 신호를 일부 잃지만, 경매가 없는 상품은 추천 후보도 될 수 없어 실제 손해는
+# 작다. 상품 단위로 바꾸려면 벡터 저장소의 키까지 함께 바꿔야 한다.
+BOOKMARKS_SQL = """
+SELECT DISTINCT ON (b.product_id)
+       a.auction_id,
+       b.created_at
+FROM bookmark b
+JOIN auction a ON a.product_id = b.product_id
+WHERE b.member_id = %(member_id)s
+  AND b.created_at >= %(since)s
+  AND a.deleted_at IS NULL
+ORDER BY b.product_id, a.auction_id DESC
+LIMIT %(limit)s
+"""
+
+
+def to_bookmark_events(rows: Sequence[Mapping[str, Any]]) -> tuple[BehaviorEvent, ...]:
+    """찜을 `WATCH` 행동으로 바꾼다. 가중치 표의 `WATCH` 를 그대로 탄다."""
+    return tuple(
+        BehaviorEvent(
+            event_type="WATCH",
+            auction_id=r["auction_id"],
+            occurred_at=to_utc(r["created_at"]),
+        )
+        for r in rows
+        if r["auction_id"] is not None and r["created_at"] is not None
+    )
+
+
+def merge_events(
+    logged: Sequence[BehaviorEvent], bookmarks: Sequence[BehaviorEvent]
+) -> tuple[BehaviorEvent, ...]:
+    """두 출처를 합친다. **같은 경매의 찜을 두 번 세지 않는다.**
+
+    백엔드가 나중에 `member_event` 에도 `WATCH` 를 넣으면 같은 찜이 양쪽에서
+    들어온다. 그러면 가중치가 4.0 이 아니라 8.0 이 되어 찜 하나가 입찰보다
+    강해진다. 이미 로그에 있는 경매는 `bookmark` 쪽을 버린다.
+    """
+    already = {e.auction_id for e in logged if e.event_type == "WATCH"}
+    return tuple(logged) + tuple(b for b in bookmarks if b.auction_id not in already)
+
+
 def to_candidates(rows: Sequence[Mapping[str, Any]]) -> tuple[Candidate, ...]:
     return tuple(
         Candidate(

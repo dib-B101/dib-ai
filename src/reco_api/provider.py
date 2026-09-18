@@ -162,12 +162,21 @@ class PostgresProvider:
         """
         conn = self._connect()
         try:
+            params = {"member_id": member_id, "since": since, "limit": limit}
             with conn, conn.cursor() as cur:
-                cur.execute(
-                    queries.EVENTS_SQL,
-                    {"member_id": member_id, "since": since, "limit": limit},
-                )
-                return queries.to_events(cur.fetchall())
+                cur.execute(queries.EVENTS_SQL, params)
+                logged = queries.to_events(cur.fetchall())
+
+                # 찜은 member_event 가 아니라 bookmark 테이블에 쌓인다.
+                cur.execute(queries.BOOKMARKS_SQL, params)
+                bookmarks = queries.to_bookmark_events(cur.fetchall())
+
+            merged = queries.merge_events(logged, bookmarks)
+            log.debug(
+                "행동 로그 member_id=%s — 이벤트 %d건 · 찜 %d건 → %d건",
+                member_id, len(logged), len(bookmarks), len(merged),
+            )
+            return merged
         except Exception:
             log.warning("행동 로그 조회 실패 member_id=%s — 인기순으로 내보냅니다", member_id)
             return ()

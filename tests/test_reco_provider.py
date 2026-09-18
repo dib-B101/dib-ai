@@ -286,3 +286,77 @@ def test_live_broadcast_id_is_exposed_in_detail(client):
 
 def test_unknown_scope_is_rejected(client):
     assert client.get(HOME, params={"scope": "SHORTS"}).status_code == 422
+
+
+# --- 찜 (bookmark 테이블) ---------------------------------------------------
+
+
+def test_bookmarks_become_watch_events():
+    """찜은 `member_event` 가 아니라 `bookmark` 테이블에 쌓인다.
+
+    백엔드가 `member_event` 에 기록하는 것은 현재 `BID` 하나뿐이다. 찜은 이미
+    별도 테이블에 저장되고 있으므로 **백엔드 작업을 기다리지 않고** 바로 쓴다.
+    """
+    rows = [{"auction_id": 10, "created_at": T0}]
+    events = queries.to_bookmark_events(rows)
+
+    assert len(events) == 1
+    assert events[0].event_type == "WATCH", "가중치 표의 WATCH(4.0) 를 그대로 탄다"
+    assert events[0].auction_id == 10
+
+
+def test_bookmark_query_picks_one_auction_per_product():
+    """`bookmark` 는 상품 단위, 프로필은 경매 단위다.
+
+    유찰 후 재등록되면 한 상품에 경매가 여러 개 붙어 행이 늘어난다.
+    상품마다 가장 최근 경매 하나만 쓴다.
+    """
+    sql = queries.BOOKMARKS_SQL
+
+    assert "DISTINCT ON (b.product_id)" in sql
+    assert "ORDER BY b.product_id, a.auction_id DESC" in sql
+    assert "a.deleted_at IS NULL" in sql
+
+
+def test_merge_does_not_double_count_the_same_bookmark():
+    """**같은 찜을 두 번 세지 않는다.**
+
+    백엔드가 나중에 `member_event` 에도 `WATCH` 를 넣으면 같은 찜이 양쪽에서
+    들어온다. 그러면 가중치가 4.0 이 아니라 8.0 이 되어 찜 하나가 입찰보다
+    강해진다.
+    """
+    from reco import BehaviorEvent
+
+    logged = (BehaviorEvent("WATCH", 10, T0), BehaviorEvent("BID", 11, T0))
+    bookmarks = (BehaviorEvent("WATCH", 10, T0), BehaviorEvent("WATCH", 12, T0))
+
+    merged = queries.merge_events(logged, bookmarks)
+
+    watched = [e.auction_id for e in merged if e.event_type == "WATCH"]
+    assert sorted(watched) == [10, 12], "10 번이 두 번 들어가면 안 된다"
+    assert len(merged) == 3
+
+
+def test_merge_keeps_every_logged_event():
+    """로그 쪽은 하나도 버리지 않는다. 같은 경매에 입찰과 찜이 함께 있을 수 있다."""
+    from reco import BehaviorEvent
+
+    logged = (BehaviorEvent("BID", 10, T0), BehaviorEvent("VIEW", 10, T0))
+    merged = queries.merge_events(logged, (BehaviorEvent("WATCH", 10, T0),))
+
+    assert len(merged) == 3, "입찰·조회에 찜이 더해져야 한다"
+
+
+def test_merge_without_bookmarks_is_unchanged():
+    from reco import BehaviorEvent
+
+    logged = (BehaviorEvent("BID", 10, T0),)
+    assert queries.merge_events(logged, ()) == logged
+
+
+def test_bookmark_times_are_lifted_to_utc(monkeypatch):
+    """`created_at` 도 시간대가 없다. 감쇠 계산이 aware 시각과 빼기를 한다."""
+    monkeypatch.setenv("DIB_DB_TIMEZONE", "Asia/Seoul")
+    events = queries.to_bookmark_events([{"auction_id": 10, "created_at": T0}])
+
+    assert events[0].occurred_at.tzinfo is not None
