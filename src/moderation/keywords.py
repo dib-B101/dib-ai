@@ -29,23 +29,48 @@ class KeywordHit:
     matched_in: str     # title | description
     evasion: bool       # 유사 문자 치환까지 해야 걸린 경우
 
+    # 이 낱말만으로 위반이 확정되는가.
+    #
+    # **`강아지분양` 은 확정이지만 `강쥐` 는 아니다.** 후자는 살아있는 강아지일 수도,
+    # 강아지 인형일 수도 있다. 확정이 아닌 낱말은 제목에 있어도 차단하지 않고 AI 에
+    # 넘긴다 — 사전에 넣어 두면 LLM 이 그 부분을 주의해서 보게 되고, 넣지 않으면
+    # 힌트 없이 지나칠 수 있다.
+    certain: bool = True
+
 
 class KeywordFilter:
-    """금칙어 사전을 Aho-Corasick 오토마타로 올려두고 재사용한다."""
+    """금칙어 사전을 Aho-Corasick 오토마타로 올려두고 재사용한다.
+
+    낱말을 **두 등급**으로 나눠 싣는다.
+
+        categories   확정. 제목에 있으면 AI 없이 즉시 차단
+        suspect      의심. 제목에 있어도 AI 에 넘겨 문맥을 보게 한다
+
+    등급이 하나뿐이면 사전을 넓힐수록 오탐이 늘어난다. `포메라니안` 을 넣으면
+    `포메라니안 방석` 이 막히고, 안 넣으면 `포메라니안 2개월 분양` 을 1차에서
+    놓친다. 의심 등급은 그 사이를 메운다.
+    """
 
     def __init__(
-        self, categories: Mapping[str, Iterable[str]], version: str = "unknown"
+        self,
+        categories: Mapping[str, Iterable[str]],
+        version: str = "unknown",
+        suspect: Mapping[str, Iterable[str]] | None = None,
     ) -> None:
         self._automaton = ahocorasick.Automaton()
         self._count = 0
         self._version = version
-        for category, words in categories.items():
-            for word in words:
-                for key in set(variants(word)):
-                    if not key:
-                        continue
-                    self._automaton.add_word(key, (word, category))
-                    self._count += 1
+
+        # 확정 등급을 나중에 넣는다. 같은 낱말이 양쪽에 있으면 확정이 이긴다 —
+        # 차단할 수 있는 것을 AI 로 넘기는 쪽이 손해다.
+        for source, certain in ((suspect or {}, False), (categories, True)):
+            for category, words in source.items():
+                for word in words:
+                    for key in set(variants(word)):
+                        if not key:
+                            continue
+                        self._automaton.add_word(key, (word, category, certain))
+                        self._count += 1
         if self._count:
             self._automaton.make_automaton()
 
@@ -53,7 +78,11 @@ class KeywordFilter:
     def load(cls, path: str | Path | None = None) -> "KeywordFilter":
         p = Path(path) if path else DEFAULT_KEYWORDS_PATH
         raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
-        return cls(raw.get("categories", {}), raw.get("version", "unknown"))
+        return cls(
+            raw.get("categories", {}),
+            raw.get("version", "unknown"),
+            raw.get("suspect", {}),
+        )
 
     @property
     def size(self) -> int:
@@ -70,14 +99,14 @@ class KeywordFilter:
         plain, aggressive = variants(text)
         hits: dict[tuple[str, str], KeywordHit] = {}
 
-        for _, (word, category) in self._automaton.iter(plain):
-            hits[(word, field)] = KeywordHit(word, category, field, evasion=False)
+        for _, (word, category, certain) in self._automaton.iter(plain):
+            hits[(word, field)] = KeywordHit(word, category, field, False, certain)
 
         # 유사 문자까지 치환해야 걸리는 것은 우회 시도로 본다.
         # 오탐 가능성이 있어 별도 표시해 두고 관리자가 판단할 수 있게 한다.
         if aggressive != plain:
-            for _, (word, category) in self._automaton.iter(aggressive):
-                hits.setdefault((word, field), KeywordHit(word, category, field, evasion=True))
+            for _, (word, category, certain) in self._automaton.iter(aggressive):
+                hits.setdefault((word, field), KeywordHit(word, category, field, True, certain))
 
         return list(hits.values())
 
@@ -101,12 +130,19 @@ class KeywordFilter:
             제목에 그대로 있음        → BLOCK     문맥을 볼 것도 없다
             설명에만 있음             → ESCALATE  부정문일 수 있다
             유사 문자 치환해야 걸림    → ESCALATE  오탐 가능성이 있다
+            의심 등급 낱말             → ESCALATE  낱말만으로는 확정할 수 없다
+
+        마지막 줄이 `suspect` 사전이다. `강쥐` 는 살아있는 강아지일 수도 강아지
+        인형일 수도 있어 제목에 있어도 차단하지 않는다. 대신 걸린 낱말을 힌트로
+        넘겨 **LLM 이 그 부분을 주의해서 보게** 한다.
         """
         hits = self.scan(title, description)
         if not hits:
             return RuleOutcome.PASS, []
 
-        certain = [h for h in hits if h.matched_in == "title" and not h.evasion]
-        if certain:
+        decisive = [
+            h for h in hits if h.matched_in == "title" and not h.evasion and h.certain
+        ]
+        if decisive:
             return RuleOutcome.BLOCK, hits
         return RuleOutcome.ESCALATE, hits
