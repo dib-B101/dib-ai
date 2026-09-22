@@ -11,7 +11,7 @@ import logging
 from datetime import datetime
 from typing import Mapping, Protocol, Sequence
 
-from reco import Candidate, ProductVector
+from reco import BehaviorEvent, Candidate, ProductVector
 
 from . import queries
 
@@ -30,6 +30,10 @@ class CandidateProvider(Protocol):
     def load_vectors(
         self, auction_ids: Sequence[int]
     ) -> Mapping[int, ProductVector]: ...
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]: ...
 
 
 class InMemoryProvider:
@@ -55,6 +59,11 @@ class InMemoryProvider:
         상태가 아니다. 호출자가 그 차이를 구분할 수 있어야 한다.
         """
         return {i: self._vectors[i] for i in auction_ids if i in self._vectors}
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]:
+        return ()
 
 
 class PostgresProvider:
@@ -138,5 +147,24 @@ class PostgresProvider:
             raise
         except Exception as exc:
             raise ProviderError(f"임베딩 조회 실패: {exc}") from exc
+        finally:
+            conn.close()
+
+    def load_events(
+        self, member_id: int, since: datetime, limit: int
+    ) -> Sequence[BehaviorEvent]:
+        """회원 행동과 찜을 합쳐 읽는다. 실패 시 인기순 폴백을 위해 빈 값 반환."""
+        conn = self._connect()
+        try:
+            params = {"member_id": member_id, "since": since, "limit": limit}
+            with conn, conn.cursor() as cur:
+                cur.execute(queries.EVENTS_SQL, params)
+                logged = queries.to_events(cur.fetchall())
+                cur.execute(queries.BOOKMARKS_SQL, params)
+                bookmarks = queries.to_bookmark_events(cur.fetchall())
+            return queries.merge_events(logged, bookmarks)
+        except Exception:
+            log.warning("행동 로그 조회 실패 member_id=%s — 인기순으로 폴백", member_id)
+            return ()
         finally:
             conn.close()

@@ -38,7 +38,7 @@ from fraud.ml_features import FEATURE_VERSION
 from fraud_api import main as fraud_app
 from fraud_api import queries as fraud_queries
 from fraud_api.provider import ProviderError as FraudProviderError
-from reco import RecoConfig, rank, reason_for
+from reco import RecoConfig, reason_for
 from reco_api import main as reco_app
 from reco_api.provider import ProviderError as RecoProviderError
 
@@ -326,7 +326,9 @@ def _run_recommendation(req: RecommendationRequest, cfg: RecoConfig, provider) -
             allowed = set(req.candidate_auction_ids)
             candidates = [c for c in candidates if c.auction_id in allowed]
 
-        result = rank(candidates, cfg, now)
+        result = reco_app.rank_for_member(
+            provider, cfg, candidates, now, req.member_id
+        )
         payload = RecommendationCallback(
             job_id=req.job_id,
             member_id=req.member_id,

@@ -91,6 +91,20 @@ WHERE deleted_at IS NULL
   AND status <> ALL(%(skip_status)s)
 """
 
+REQUIRED_COLUMNS = ("text_embedding", "image_embedding")
+
+COLUMNS_SQL = """
+SELECT column_name
+FROM information_schema.columns
+WHERE table_name = 'product'
+  AND column_name = ANY(%(names)s)
+"""
+
+
+def missing_columns(rows: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
+    found = {r["column_name"] for r in rows}
+    return tuple(name for name in REQUIRED_COLUMNS if name not in found)
+
 
 @dataclass(frozen=True, slots=True)
 class PendingProduct:

@@ -117,31 +117,34 @@ def blend(
     return dict(zip(keys, percentile_ranks(fused)))
 
 
+def compare(
+    seed_text: Sequence[float],
+    seed_image: Sequence[float] | None,
+    others: Sequence[ProductVector],
+    w_text: float,
+) -> dict[int, float]:
+    """상품 또는 사용자 프로필 벡터와 후보들의 종합 유사도."""
+    if not others:
+        return {}
+
+    text_sims = {v.auction_id: cosine(seed_text, v.text) for v in others}
+    image_sims = (
+        {
+            v.auction_id: cosine(seed_image, v.image)
+            for v in others
+            if v.image is not None
+        }
+        if seed_image is not None
+        else {}
+    )
+    return blend(text_sims, image_sims, w_text)
+
+
 def similarities(
     seed: ProductVector,
     others: Sequence[ProductVector],
     w_text: float,
 ) -> dict[int, float]:
-    """기준 상품과 후보들의 종합 유사도.
-
-    씨앗 자신은 결과에서 빠진다. 자기 자신은 유사도 1 이라 반드시 1위가 되는데,
-    **지금 보고 있는 상품을 "이런 상품은 어때요" 에 다시 띄우는 것은 사고다.**
-
-    씨앗에 이미지가 없으면 이미지 항 자체가 사라져 전원 텍스트로만 비교된다.
-    일부만 이미지가 없을 때와 달리 불리해지는 쪽이 없으므로 그대로 둔다.
-    """
+    """기준 상품과 후보들의 종합 유사도. 기준 상품 자신은 제외한다."""
     pool = [v for v in others if v.auction_id != seed.auction_id]
-    if not pool:
-        return {}
-
-    text_sims = {v.auction_id: cosine(seed.text, v.text) for v in pool}
-    image_sims = (
-        {
-            v.auction_id: cosine(seed.image, v.image)
-            for v in pool
-            if v.image is not None
-        }
-        if seed.image is not None
-        else {}
-    )
-    return blend(text_sims, image_sims, w_text)
+    return compare(seed.text, seed.image, pool, w_text)

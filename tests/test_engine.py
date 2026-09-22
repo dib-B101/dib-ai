@@ -199,6 +199,16 @@ def test_combine_weights():
     assert combine(0.8, None, 0.7, 0.3) == pytest.approx(0.8)  # 모델 미서빙 기간
 
 
+def test_zero_ml_weight_returns_the_rule_score_exactly():
+    """섀도 모드가 이 성질에 기댄다 — 모델 점수가 있어도 판정은 안 바뀐다.
+
+    `(w_rule × r + 0 × ml) / w_rule` 로 계산해도 값은 같지만, 나눗셈을 거치면
+    끝자리가 흔들려 "가중치를 0 으로 뒀는데 점수가 왜 달라졌지" 를 쫓게 된다.
+    """
+    assert combine(0.8, 0.9, 1.0, 0.0) == 0.8
+    assert combine(0.1234567, 0.9, 0.7, 0.0) == 0.1234567
+
+
 def test_combine_is_invertible():
     """두 점수를 각각 저장하면 가중치를 역산할 수 있다."""
     rule, ml, w = 0.79, 0.62, 0.7

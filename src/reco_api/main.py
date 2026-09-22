@@ -4,14 +4,21 @@
     GET /internal/reco/similar  기준 상품과 닮은 경매
     GET /reco/health            헬스체크
 
-**지금은 개인화가 없다.** 인기도와 마감 임박도만으로 순서를 만든다. 이것을 먼저 만드는
-이유는 세 곳에서 재사용되기 때문이다.
+**`member_id` 를 주면 개인화한다.** 행동 로그로 관심 프로필을 만들어 후보와의 유사도를
+점수에 섞는다. 로그가 없거나 행동한 상품에 임베딩이 없으면 **인기순으로 떨어진다** —
+그것이 정상 경로다. 어느 쪽이 적용됐는지는 응답의 `strategy` 로 구분한다.
+
+    personalized   관심 프로필이 반영됨
+    similar        기준 상품과의 유사도가 반영됨
+    popularity     마감 임박도·인기도·경쟁도만 (폴백 포함)
+
+인기순은 개인화가 붙은 뒤에도 그대로 남는다. 세 곳에서 재사용되기 때문이다.
 
 1. Cold Start 폴백 — 행동 이력이 없는 사용자
 2. 성능 평가 baseline — 개인화가 이것보다 나은지 증명해야 한다
 3. 장애 폴백 — 임베딩·벡터 검색이 죽어도 추천은 나가야 한다
 
-개인화가 붙어도 이 엔드포인트의 계약은 바뀌지 않는다. `strategy` 필드 값만 달라진다.
+**엔드포인트 계약은 개인화 전후로 바뀌지 않았다.** `strategy` 필드 값만 달라진다.
 """
 
 from __future__ import annotations
@@ -19,12 +26,12 @@ from __future__ import annotations
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, status
 
 from envfile import load_env
-from reco import RecoConfig, RecoResult, rank, similarities
+from reco import RecoConfig, RecoResult, affinity, build_profile, rank, similarities
 
 from .demo import demo_candidates, demo_vectors
 from .models import RecoHealthResponse, RecoItem, RecoResponse
@@ -133,6 +140,73 @@ def health(cfg: RecoConfig = Depends(get_config)) -> RecoHealthResponse:
     )
 
 
+def _personalize(provider, cfg: RecoConfig, member_id: int, candidates, now):
+    """회원 행동으로 후보별 취향 점수를 만든다. 못 만들면 인기순으로 폴백한다."""
+    since = now - timedelta(days=cfg.lookback_days)
+    try:
+        events = provider.load_events(member_id, since, cfg.max_events)
+    except ProviderError:
+        log.exception("행동 로그 조회 실패 member_id=%s", member_id)
+        return None
+    if not events:
+        return None
+
+    behaved = {e.auction_id for e in events}
+    wanted = behaved | {c.auction_id for c in candidates}
+    try:
+        vectors = provider.load_vectors(sorted(wanted))
+    except ProviderError:
+        log.exception("임베딩 조회 실패 member_id=%s", member_id)
+        return None
+
+    profile = build_profile(
+        member_id=member_id,
+        events=events,
+        vectors=vectors,
+        now=now,
+        weights=cfg.event_weights or None,
+        half_life_days=cfg.half_life_days,
+    )
+    if profile is None:
+        return None
+
+    usable = [vectors[c.auction_id] for c in candidates if c.auction_id in vectors]
+    return affinity(profile, usable, cfg.similarity_text_weight) or None
+
+
+def rank_for_member(
+    provider,
+    cfg: RecoConfig,
+    candidates,
+    now,
+    member_id: int | None,
+    limit: int | None = None,
+):
+    """동기·비동기 추천이 함께 쓰는 개인화 랭킹 진입점."""
+    scores = (
+        _personalize(provider, cfg, member_id, candidates, now)
+        if member_id is not None
+        else None
+    )
+    if not scores:
+        return rank(candidates, cfg, now, limit=limit)
+
+    fresh = [c for c in candidates if c.auction_id in scores]
+    result = rank(
+        fresh,
+        cfg,
+        now,
+        limit=limit,
+        similarity=scores,
+        strategy="personalized",
+        similarity_weight=cfg.personalization_weight,
+    )
+    already = len(candidates) - len(fresh)
+    if already:
+        result.excluded["already_seen"] = already
+    return result
+
+
 def _by_scope(candidates, scope: str):
     """라이브 · 일반 경매를 가른다 (명세 108).
 
@@ -166,8 +240,8 @@ def home(
     member_id: int | None = Query(
         None,
         description=(
-            "요청한 회원. **현재는 사용하지 않는다** — 개인화 전이라 누가 요청하든 "
-            "같은 순서가 나온다. 개인화가 붙으면 이 값으로 프로필을 만든다"
+            "요청한 회원. 주면 행동 로그와 찜을 이용해 개인화한다. "
+            "로그나 벡터가 없으면 자동으로 인기순으로 폴백한다"
         ),
     ),
     limit: int = Query(20, ge=1, le=100, description="돌려받을 개수"),
@@ -181,7 +255,7 @@ def home(
     """
     now = datetime.now(timezone.utc)
     candidates = _by_scope(_load_active(provider, now), scope)
-    return _to_response(rank(candidates, cfg, now, limit=limit))
+    return _to_response(rank_for_member(provider, cfg, candidates, now, member_id, limit))
 
 
 @router.get(
@@ -253,8 +327,11 @@ app = FastAPI(
     lifespan=lifespan,
     description=(
         "홈 리스트에 노출할 경매 순서를 돌려준다.\n\n"
-        "**현재는 개인화가 없다.** 마감 임박도·인기도·경쟁도만 쓴다. "
-        "개인화가 가동되어도 이 계약은 바뀌지 않고 `strategy` 값만 달라진다."
+        "**`member_id` 를 주면 개인화된다.** 행동 로그로 만든 관심 프로필을 "
+        "마감 임박도·인기도·경쟁도와 섞는다. 로그가 없으면 인기순으로 떨어지므로 "
+        "신규 사용자에게도 그대로 호출하면 된다.\n\n"
+        "적용된 방식은 응답의 `strategy` 로 구분한다 — "
+        "`personalized` · `similar` · `popularity`."
     ),
 )
 app.include_router(router)

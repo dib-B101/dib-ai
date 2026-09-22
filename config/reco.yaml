@@ -53,3 +53,21 @@ similarity:
   # 텍스트와 이미지 유사도의 비율. 중고 거래에서는 모델명·상태·구성품 같은
   # 결정적 정보가 대부분 텍스트에 있다.
   text: 0.6
+
+# 행동 로그 기반 개인화. 로그나 벡터가 없으면 자동으로 인기순으로 폴백한다.
+personalization:
+  weight: 0.4
+  half_life_days: 14
+  lookback_days: 90
+  max_events: 500
+  events:
+    BID: 6.0
+    PURCHASE: 6.0
+    WATCH: 4.0
+    SEARCH: 2.0
+    CLICK: 2.0
+    SHARE: 2.0
+    VIEW: 1.0
+    IMPRESSION: 0.0
+    SCROLL_PASS: -0.5
+    UNWATCH: -4.0

@@ -35,7 +35,7 @@ from __future__ import annotations
 from typing import Any, Mapping, Sequence
 
 from dbtime import to_utc
-from reco import Candidate, ProductVector
+from reco import BehaviorEvent, Candidate, ProductVector
 
 # 검수를 통과하지 못한 상품 상태. 이 목록에 있으면 추천에 노출하지 않는다.
 #
@@ -83,6 +83,61 @@ JOIN product p ON p.product_id = a.product_id
 WHERE a.auction_id = ANY(%(auction_ids)s)
   AND p.text_embedding IS NOT NULL
 """
+
+EVENTS_SQL = """
+SELECT event_type, auction_id, occured_at
+FROM member_event
+WHERE member_id = %(member_id)s
+  AND auction_id IS NOT NULL
+  AND occured_at >= %(since)s
+ORDER BY occured_at DESC
+LIMIT %(limit)s
+"""
+
+BOOKMARKS_SQL = """
+SELECT DISTINCT ON (b.product_id)
+       a.auction_id,
+       b.created_at
+FROM bookmark b
+JOIN auction a ON a.product_id = b.product_id
+WHERE b.member_id = %(member_id)s
+  AND b.created_at >= %(since)s
+  AND a.deleted_at IS NULL
+ORDER BY b.product_id, a.auction_id DESC
+LIMIT %(limit)s
+"""
+
+
+def to_events(rows: Sequence[Mapping[str, Any]]) -> tuple[BehaviorEvent, ...]:
+    return tuple(
+        BehaviorEvent(
+            event_type=str(r["event_type"]),
+            auction_id=r["auction_id"],
+            occurred_at=to_utc(r["occured_at"]),
+        )
+        for r in rows
+        if r["auction_id"] is not None and r["occured_at"] is not None
+    )
+
+
+def to_bookmark_events(rows: Sequence[Mapping[str, Any]]) -> tuple[BehaviorEvent, ...]:
+    return tuple(
+        BehaviorEvent(
+            event_type="WATCH",
+            auction_id=r["auction_id"],
+            occurred_at=to_utc(r["created_at"]),
+        )
+        for r in rows
+        if r["auction_id"] is not None and r["created_at"] is not None
+    )
+
+
+def merge_events(
+    logged: Sequence[BehaviorEvent], bookmarks: Sequence[BehaviorEvent]
+) -> tuple[BehaviorEvent, ...]:
+    """로그와 찜을 합치되 같은 경매의 WATCH는 중복 계산하지 않는다."""
+    already = {e.auction_id for e in logged if e.event_type == "WATCH"}
+    return tuple(logged) + tuple(b for b in bookmarks if b.auction_id not in already)
 
 
 def to_candidates(rows: Sequence[Mapping[str, Any]]) -> tuple[Candidate, ...]:

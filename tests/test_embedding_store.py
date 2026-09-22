@@ -171,3 +171,20 @@ def test_reclaimed_rows_are_not_recomputed_in_the_same_run():
     """
     assert "%(skip_status)s" in store.RECLAIM_SQL
     assert "%(skip_status)s" in store.PENDING_SQL
+
+
+def test_missing_columns_reports_what_is_absent():
+    rows = [{"column_name": "text_embedding"}]
+    assert store.missing_columns(rows) == ("image_embedding",)
+
+
+def test_missing_columns_is_empty_when_ready():
+    rows = [
+        {"column_name": "text_embedding"},
+        {"column_name": "image_embedding"},
+    ]
+    assert store.missing_columns(rows) == ()
+
+
+def test_missing_columns_reports_both_on_fresh_schema():
+    assert store.missing_columns([{"column_name": "embedding"}]) == store.REQUIRED_COLUMNS

@@ -117,7 +117,12 @@ class ModerationPipeline:
     def _blocked_by_rule(
         self, product: ProductInput, hits: list[KeywordHit], content_hash: str
     ) -> ModerationResult:
-        hit = next(h for h in hits if h.matched_in == "title" and not h.evasion)
+        # **`decide()` 의 BLOCK 조건과 같은 식이어야 한다.** 여기서 다른 것을 고르면
+        # 차단 사유에 엉뚱한 카테고리가 적힌다 — 제목의 확정 낱말 때문에 막혔는데
+        # 설명에 걸린 의심 낱말의 카테고리가 사용자에게 보이는 식이다.
+        hit = next(
+            h for h in hits if h.matched_in == "title" and not h.evasion and h.certain
+        )
         return ModerationResult(
             product_id=product.product_id,
             verdict=Verdict.BLOCKED,
@@ -144,8 +149,20 @@ class ModerationPipeline:
 
 
 def _hint(hits: list[KeywordHit]) -> str:
-    parts = [f"{h.category}/{h.keyword}({h.matched_in}" + (", 우회 의심)" if h.evasion else ")")
-             for h in hits]
+    """LLM 에 넘길 힌트. **왜 애매한지까지 적는다.**
+
+    `동물/강쥐(title, 확정 아님)` 처럼 등급을 함께 주면 모델이 "이 낱말이 걸리긴
+    했으나 그것만으로 단정할 수 없다" 를 읽는다. 낱말만 던지면 걸렸다는 사실이
+    차단 지시로 읽혀 오탐이 는다.
+    """
+    parts = []
+    for h in hits:
+        notes = [h.matched_in]
+        if h.evasion:
+            notes.append("우회 의심")
+        if not h.certain:
+            notes.append("확정 아님")
+        parts.append(f"{h.category}/{h.keyword}({', '.join(notes)})")
     return ", ".join(parts)
 
 
@@ -156,6 +173,7 @@ def _dump(hits: list[KeywordHit]) -> list[dict]:
             "category": h.category,
             "matched_in": h.matched_in,
             "evasion": h.evasion,
+            "certain": h.certain,
         }
         for h in hits
     ]

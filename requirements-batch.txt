@@ -1,0 +1,19 @@
+# 상품 임베딩 배치 (`scripts/embed_products.py`).
+#
+#     pip install -r requirements-batch.txt
+#
+# **서버에는 필요 없다.** 여기 있는 것만 2GB 가 넘는데, 서버는 DB 에 이미 들어 있는
+# 벡터를 읽기만 하고 모델을 올리지 않는다. 배포 이미지에 넣지 마십시오.
+#
+# GPU 를 쓰려면 torch·torchvision 을 CUDA 빌드로 **먼저** 설치해야 한다.
+# 아래 순서를 지키지 않으면 CPU 판이 깔린 뒤 덮어쓰이지 않는다.
+#
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+#     pip install -r requirements-batch.txt
+
+-r requirements.txt
+
+torch>=2.4
+torchvision>=0.19            # SigLIP 이미지 전처리에 필요
+transformers>=4.44
+sentence-transformers>=3.0   # BGE-M3 로더

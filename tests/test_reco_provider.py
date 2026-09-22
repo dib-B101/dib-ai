@@ -287,3 +287,22 @@ def test_live_broadcast_id_is_exposed_in_detail(client):
 
 def test_unknown_scope_is_rejected(client):
     assert client.get(HOME, params={"scope": "SHORTS"}).status_code == 422
+
+
+def test_bookmarks_become_watch_events():
+    events = queries.to_bookmark_events([{"auction_id": 10, "created_at": T0}])
+    assert [(e.event_type, e.auction_id) for e in events] == [("WATCH", 10)]
+
+
+def test_bookmark_query_picks_one_auction_per_product():
+    assert "DISTINCT ON (b.product_id)" in queries.BOOKMARKS_SQL
+    assert "ORDER BY b.product_id, a.auction_id DESC" in queries.BOOKMARKS_SQL
+
+
+def test_merge_does_not_double_count_the_same_bookmark():
+    from reco import BehaviorEvent
+
+    logged = (BehaviorEvent("WATCH", 10, T0), BehaviorEvent("BID", 11, T0))
+    bookmarks = (BehaviorEvent("WATCH", 10, T0), BehaviorEvent("WATCH", 12, T0))
+    merged = queries.merge_events(logged, bookmarks)
+    assert sorted(e.auction_id for e in merged if e.event_type == "WATCH") == [10, 12]

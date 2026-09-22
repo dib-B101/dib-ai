@@ -1,0 +1,46 @@
+# PR 과 develop·main 푸시마다 테스트를 돌린다.
+#
+# **requirements-dev.txt 만 설치한다.** 임베딩 배치용 torch·transformers 는 2GB 가
+# 넘는데 테스트는 하나도 쓰지 않는다 (모델을 올리는 부분은 사람이 스크립트로 확인한다).
+# 실제로 torch 를 임포트 불가로 막고 전체 테스트가 통과하는 것을 확인했다.
+#
+# 탐지 모델(artifacts/shill_lgbm_v0.joblib, 300KB)은 레포에 들어 있으므로 ML 트랙
+# 테스트도 건너뛰지 않고 돈다. 없으면 조용히 skip 되어 "다 통과" 로 보인다.
+name: tests
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  # 같은 브랜치에 연달아 푸시하면 앞의 실행은 의미가 없다. 취소해 러너를 아낀다.
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: 의존성 설치 (서버 + 테스트)
+        run: pip install -r requirements-dev.txt
+
+      - name: 탐지 모델이 레포에 있는지 확인
+        # 없으면 ML 테스트가 skip 되면서 초록불이 뜬다. 조용히 빠지는 쪽이 더 위험하다.
+        run: test -f artifacts/shill_lgbm_v0.joblib
+
+      - name: 테스트
+        run: python -m pytest -q

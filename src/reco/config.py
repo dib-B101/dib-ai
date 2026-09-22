@@ -24,6 +24,11 @@ class RecoConfig:
     weights: Mapping[str, float]
     similarity_weight: float
     similarity_text_weight: float
+    personalization_weight: float
+    half_life_days: float
+    lookback_days: int
+    max_events: int
+    event_weights: Mapping[str, float]
     limit: int
 
     @classmethod
@@ -39,6 +44,15 @@ class RecoConfig:
             weights=dict(raw.get("weights", {})),
             similarity_weight=float(raw.get("similarity", {}).get("weight", 0.5)),
             similarity_text_weight=float(raw.get("similarity", {}).get("text", 0.6)),
+            personalization_weight=float(
+                raw.get("personalization", {}).get("weight", 0.4)
+            ),
+            half_life_days=float(
+                raw.get("personalization", {}).get("half_life_days", 14)
+            ),
+            lookback_days=int(raw.get("personalization", {}).get("lookback_days", 90)),
+            max_events=int(raw.get("personalization", {}).get("max_events", 500)),
+            event_weights=dict(raw.get("personalization", {}).get("events", {})),
             limit=int(raw.get("limit", 50)),
         )
         cfg.validate()
@@ -52,11 +66,14 @@ class RecoConfig:
         for name, value in (
             ("similarity.weight", self.similarity_weight),
             ("similarity.text", self.similarity_text_weight),
+            ("personalization.weight", self.personalization_weight),
         ):
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{name} 는 0~1 이어야 합니다: {value}")
         if self.tau_seconds <= 0:
             raise ValueError(f"tau_seconds 는 양수여야 합니다: {self.tau_seconds}")
+        if self.half_life_days <= 0:
+            raise ValueError(f"half_life_days 는 양수여야 합니다: {self.half_life_days}")
 
         for name, group in (
             ("popularity", self.popularity),

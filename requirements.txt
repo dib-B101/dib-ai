@@ -1,10 +1,20 @@
-# 규칙 엔진
-pyyaml>=6.0
+# AI 서버 실행에 필요한 것 (`uvicorn serve:app`).
+#
+#     pip install -r requirements.txt
+#
+# **임베딩 배치는 여기 없다.** torch·transformers 는 2GB 가 넘는데 서버는 쓰지
+# 않는다 — 벡터를 만드는 것은 `scripts/embed_products.py` 이고, 서버는 DB 에 이미
+# 들어 있는 벡터를 읽기만 한다. 배치를 돌릴 때만 requirements-batch.txt 를 깐다.
+#
+#     서버      이 파일                    탐지 · 검수 · 추천 API
+#     배치      requirements-batch.txt     상품 임베딩 (GPU 권장)
+#     개발      requirements-dev.txt       테스트 · 노트북 · 모델 학습
 
-# API
+# --- API ---------------------------------------------------------------------
 fastapi>=0.110
 uvicorn[standard]>=0.27
 python-dotenv>=1.0   # .env 로 키·모델 설정
+pyyaml>=6.0          # 규칙·추천 설정 로더
 
 # 실제 DB 조회 (PostgresProvider). DIB_DATABASE_URL 을 쓸 때만 필요하다.
 psycopg[binary]>=3.1
@@ -13,34 +23,16 @@ psycopg[binary]>=3.1
 pytest>=8.0
 httpx>=0.27          # fastapi.testclient 가 사용
 
-# EDA / 모델 (노트북)
-pandas
-numpy
-scikit-learn
-matplotlib
-seaborn
-scipy
-joblib
-
-# ML 트랙
+# --- 이상거래 탐지 ML 트랙 ----------------------------------------------------
+# 모델은 artifacts/ 에 들어 있다. 없으면 규칙 트랙만으로 뜬다.
 lightgbm>=4.0
-shap>=0.44
+scikit-learn==1.9.0  # 동봉 joblib 생성 버전과 일치해야 안전하게 역직렬화된다
+joblib               # 모델 로드
+pandas               # 추론 입력을 DataFrame 으로 만든다 (predict.py)
+numpy
 
-# 상품 검수
+# --- 상품 검수 ---------------------------------------------------------------
 pyahocorasick>=2.0   # 금칙어 다중 패턴 매칭
 pillow>=10.0         # 이미지 리사이즈 (토큰 절감)
 anthropic>=0.40      # 2차 AI 검수 — Claude
 openai>=1.40         # 2차 AI 검수 — GPT (둘 중 하나만 있어도 동작)
-
-# 상품 임베딩 (추천 STEP 2)
-#
-# GPU 를 쓰려면 torch·torchvision 을 CUDA 빌드로 따로 설치해야 한다.
-# 아래 pip install 로는 CPU 판이 깔린다.
-#
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-#
-# torchvision 은 SigLIP 이미지 전처리에 필요하다.
-torch>=2.4
-torchvision>=0.19
-transformers>=4.44
-sentence-transformers>=3.0   # BGE-M3 로더

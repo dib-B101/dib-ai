@@ -61,6 +61,18 @@ def connect(dsn: str):
     return psycopg.connect(dsn, row_factory=dict_row)
 
 
+def require_columns(conn) -> None:
+    """필수 벡터 컬럼이 없으면 모델 로드 전에 명확히 중단한다."""
+    with conn.cursor() as cur:
+        cur.execute(store.COLUMNS_SQL, {"names": list(store.REQUIRED_COLUMNS)})
+        missing = store.missing_columns(cur.fetchall())
+    if missing:
+        raise SystemExit(
+            f"product 에 {' · '.join(missing)} 이(가) 없습니다. "
+            "scripts/split_embedding_columns.sql 을 먼저 실행하십시오."
+        )
+
+
 def fetch_pending(conn, limit: int, force: bool):
     with conn.cursor() as cur:
         cur.execute(
@@ -157,6 +169,7 @@ def main() -> int:
 
     conn = connect(dsn)
     try:
+        require_columns(conn)
         if not (args.dry_run or args.no_reclaim):
             wiped = reclaim_stale(conn)
             if wiped:

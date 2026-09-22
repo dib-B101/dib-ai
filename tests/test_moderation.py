@@ -93,6 +93,56 @@ def test_clean_product_passes(kf):
     assert hits == []
 
 
+# --- 의심 등급 ----------------------------------------------------------------
+#
+# 사전을 한 등급으로만 두면 넓힐수록 오탐이 는다. `포메라니안` 을 넣으면
+# `포메라니안 방석` 이 막히고, 안 넣으면 `포메라니안 2개월 분양` 을 1차에서 놓친다.
+# 의심 등급은 **걸리되 차단하지 않는** 자리다.
+
+
+def test_suspect_word_in_title_escalates_instead_of_blocking(kf):
+    """`강쥐` 는 살아있는 강아지일 수도 강아지 인형일 수도 있다."""
+    outcome, hits = kf.decide("강쥐 팝니다")
+
+    assert outcome is RuleOutcome.ESCALATE, "의심 낱말로 차단하면 인형이 막힌다"
+    assert hits, "차단은 안 해도 LLM 힌트로는 넘겨야 한다"
+    assert all(not h.certain for h in hits)
+
+
+def test_pet_supply_is_not_blocked_by_breed_name(kf):
+    """품종명은 방석·옷·사료에 그대로 붙는다. 낱말만으로 판정할 수 없다."""
+    for title in ["포메라니안 방석", "시바견 스티커", "말티즈 옷 팝니다"]:
+        outcome, _ = kf.decide(title)
+        assert outcome is RuleOutcome.ESCALATE, title
+
+
+def test_certain_word_still_blocks(kf):
+    """`강아지분양` 은 낱말만으로 확정된다. 의심 등급이 생겨도 그대로 차단한다."""
+    outcome, hits = kf.decide("강아지분양 합니다")
+
+    assert outcome is RuleOutcome.BLOCK
+    assert any(h.certain and h.category == "동물" for h in hits)
+
+
+def test_suspect_word_does_not_weaken_a_certain_hit(kf):
+    """의심 낱말이 섞여 있다고 확정 낱말의 차단이 풀리면 안 된다."""
+    outcome, _ = kf.decide("전자담배 강쥐 에디션")
+
+    assert outcome is RuleOutcome.BLOCK
+
+
+def test_block_reason_names_the_decisive_word(kf):
+    """차단 사유가 **차단을 만든 낱말**의 카테고리여야 한다.
+
+    의심 낱말 쪽 카테고리가 적히면 사용자가 엉뚱한 이유를 보게 된다.
+    """
+    result = ModerationPipeline(kf).review(
+        ProductInput(product_id=1, title="전자담배 강쥐 에디션")
+    )
+
+    assert result.category == "담배", "의심 낱말(동물)이 사유로 나갔다"
+
+
 # ---------------------------------------------------------------- 파이프라인
 
 class FakeLLM:

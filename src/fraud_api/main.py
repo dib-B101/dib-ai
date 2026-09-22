@@ -43,6 +43,17 @@ log = logging.getLogger("fraud_api")
 W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
 W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
 
+
+def _flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+# 모델 점수는 수집하지만 W_ML=0인 동안 판정에는 반영하지 않는다.
+ML_SHADOW = _flag("FRAUD_ML_SHADOW", True)
+
 # DB 가 설정되어 있으면 실제 조회를, 아니면 합성 데이터를 쓴다.
 #
 # **연결 실패 시 합성 데이터로 넘어가지 않는다.** 그러면 서버는 정상으로 보이는데
@@ -147,7 +158,7 @@ def score_bidders(
 
     # 모델 점수는 한 번에 계산한다. 입찰자마다 부르면 경매 하나에 수십 번이 된다.
     ml_scores: dict[int, float | None] = {r.member_id: None for r in result.results}
-    if model is not None and W_ML > 0:
+    if model is not None and (W_ML > 0 or ML_SHADOW):
         if features:
             try:
                 for member_id, score in zip(
@@ -231,11 +242,13 @@ def detect_auction(
     model: FraudModel | None = _state.get("model")  # type: ignore[assignment]
     results, weights, skipped, auction_error, as_of = score_bidders(inp, cfg, model)
 
+    scored = any(r.ml_score is not None for r in results)
     return DetectResponse(
         auction_id=inp.auction.auction_id,
         as_of=as_of,
         rule_config_version=cfg.version,
-        model_version=model.version if model is not None and W_ML > 0 else None,
+        model_version=model.version if model is not None and scored else None,
+        ml_shadow=scored and W_ML <= 0,
         weights=weights,
         results=results,
         skipped_bidders=skipped,

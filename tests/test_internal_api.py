@@ -384,11 +384,14 @@ def test_ended_auction_is_excluded_even_if_requested(client, sent):
 
 
 def test_behavior_window_is_accepted_but_unused(client, sent):
-    """개인화 전이라 무시한다. **거절하면 연동이 깨지므로 받아만 둔다.**"""
+    """조회 구간은 서버 설정이 정하므로 요청값에 따라 순서가 달라지지 않는다."""
     post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-r2", behaviorWindow=None))
     post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-r3", behaviorWindow={"days": 7}))
 
-    assert json.loads(sent[0]["body"])["items"] == json.loads(sent[1]["body"])["items"]
+    def order(body):
+        return [i["auctionId"] for i in json.loads(body)["items"]]
+
+    assert order(sent[0]["body"]) == order(sent[1]["body"])
 
 
 def test_backend_utc_timestamps_do_not_shift_the_features(client, sent):
@@ -469,3 +472,42 @@ def test_gated_bidder_is_not_retried(client, sent):
     post_signed(client, BID_ANOMALIES, bid_request(memberId=999_999))
 
     assert sent == []
+
+
+class _EventProvider:
+    name = "in-memory(events)"
+
+    def __init__(self, inner, events):
+        self._inner, self._events = inner, events
+
+    def load_active(self, now, limit):
+        return self._inner.load_active(now, limit)
+
+    def load_vectors(self, auction_ids):
+        return self._inner.load_vectors(auction_ids)
+
+    def load_events(self, member_id, since, limit):
+        return self._events.get(member_id, ())
+
+
+@pytest.fixture
+def with_events(monkeypatch):
+    from datetime import datetime, timezone
+    from reco import BehaviorEvent
+    from reco_api import main as reco_app
+
+    inner = reco_app._state["provider"]
+    events = {7: (BehaviorEvent("BID", 20001, datetime.now(timezone.utc)),)}
+    monkeypatch.setitem(reco_app._state, "provider", _EventProvider(inner, events))
+
+
+def test_async_path_uses_personalization(client, sent, with_events):
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p1", memberId=7))
+    ids = [i["auctionId"] for i in json.loads(sent[0]["body"])["items"]]
+    assert ids[0] == 20003
+    assert 20001 not in ids
+
+
+def test_member_without_events_still_gets_recommendations(client, sent, with_events):
+    post_signed(client, RECOMMENDATIONS, reco_request(jobId="job-p2", memberId=999))
+    assert json.loads(sent[0]["body"])["items"]

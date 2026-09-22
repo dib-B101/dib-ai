@@ -89,6 +89,7 @@ def rank(
     boost: Callable[[Candidate], float] | None = None,
     similarity: Mapping[int, float] | None = None,
     strategy: str = "popularity",
+    similarity_weight: float | None = None,
 ) -> RecoResult:
     """추천 목록을 만든다.
 
@@ -119,7 +120,9 @@ def rank(
     comps = _weighted_percentile(alive, dict(cfg.competition))
 
     w = cfg.weights
-    w_sim = cfg.similarity_weight if similarity else 0.0
+    w_sim = 0.0
+    if similarity:
+        w_sim = cfg.similarity_weight if similarity_weight is None else similarity_weight
 
     scored: list[Scored] = []
     for i, c in enumerate(alive):

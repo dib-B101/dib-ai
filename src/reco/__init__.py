@@ -1,15 +1,15 @@
 """개인화 추천.
 
-STEP 1 (인기순) 과 STEP 3 (유사 상품) 까지 구현되어 있다. 개인화는
-popularity.rank() 의 boost 인자로 끼워 넣는다 — 랭킹 코드를 다시 쓰지 않기 위한
-자리다.
+STEP 1 (인기순) · STEP 3 (유사 상품) · STEP 5 (개인화) 가 구현되어 있다.
+행동 로그가 없으면 개인화는 자동으로 인기순으로 폴백한다.
 """
 
 from .config import RecoConfig
 from .explain import reason_for
 from .popularity import percentile_ranks, rank, urgency
 from .schema import Candidate, ProductVector, RecoResult, Scored
-from .similarity import blend, cosine, similarities
+from .profile import BehaviorEvent, UserProfile, affinity, build_profile
+from .similarity import blend, compare, cosine, similarities
 
 __all__ = [
     "RecoConfig",
@@ -24,4 +24,9 @@ __all__ = [
     "cosine",
     "blend",
     "similarities",
+    "compare",
+    "BehaviorEvent",
+    "UserProfile",
+    "build_profile",
+    "affinity",
 ]

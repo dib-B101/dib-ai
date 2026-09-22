@@ -14,13 +14,11 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./
-# torch 를 먼저 CPU 판으로 깐다. 이 줄이 없으면 requirements.txt 의 torch 가
-# CUDA 빌드(수 GB)로 받아진다
-RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu \
- && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 # envfile.py 가 ROOT 를 parents[1] 로 잡는다. src 가 /app/src 여야 config 와 .env 를 /app 에서 찾는다
 COPY config ./config
+COPY artifacts ./artifacts
 COPY src ./src
 
 WORKDIR /app/src
