@@ -265,6 +265,30 @@ def test_openai_verdict_is_parsed(monkeypatch):
     assert verdict.model_version == "gpt-4o-2024-08-06"
 
 
+def test_gpt6_luna_uses_supported_chat_completion_options():
+    import types
+
+    calls = []
+    payload = '{"verdict":"정상","category":null,"confidence":0.95,"reason":"일반 상품입니다."}'
+    response = types.SimpleNamespace(
+        choices=[types.SimpleNamespace(message=types.SimpleNamespace(content=payload, refusal=None))],
+        model="gpt-6-luna",
+    )
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(
+                create=lambda **kwargs: (calls.append(kwargs), response)[1]
+            )
+        )
+    )
+
+    OpenAIModerationLLM(client, model="gpt-6-luna").judge(_product())
+
+    assert calls[0]["max_completion_tokens"] == 1024
+    assert calls[0]["reasoning_effort"] == "none"
+    assert "max_tokens" not in calls[0]
+
+
 def test_openai_refusal_raises_so_pipeline_holds(monkeypatch):
     """거부 응답은 content 가 비어 있다. 보류로 넘어가야 한다."""
     import types

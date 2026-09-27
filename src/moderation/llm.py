@@ -389,9 +389,14 @@ class OpenAIModerationLLM:
         return SYSTEM_PROMPT
 
     def judge(self, product: ProductInput, hint: str | None = None) -> LLMVerdict:
+        token_options = (
+            {"max_completion_tokens": 1024, "reasoning_effort": "none"}
+            if self._model.startswith("gpt-6-")
+            else {"max_tokens": 1024}
+        )
         response = self._client.chat.completions.create(
             model=self._model,
-            max_tokens=1024,
+            **token_options,
             response_format=self._response_format(),
             messages=[
                 {"role": "system", "content": self._system_prompt()},
