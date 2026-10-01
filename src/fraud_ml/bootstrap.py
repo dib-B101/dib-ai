@@ -182,12 +182,57 @@ def compute_operating_points(y_true, prob, thresholds=(0.2, 0.3, 0.4, 0.5, 0.6, 
     return rows
 
 
-def _make_model() -> LGBMClassifier:
+# 피처별 단조 방향. +1 은 "값이 커지면 위험도가 내려갈 수 없다" 는 뜻이다.
+#
+# **서빙 피처 7개가 전부 +1 인 것은 우연이 아니다.** 원래 방향이 반대인 것들은
+# `1 − 비율` 형태로 정의 단계에서 미리 뒤집어 "클수록 위험" 으로 통일해 두었다
+# (`fraud/ml_features.py`). 시작가는 낮을수록 위험한데 `1 − 이 시작가 / 평균` 으로
+# 만든 것이 그 예다.
+#
+# 데이터로도 확인했다. 7개 전부 Spearman 양수였고 음수인 피처는 없었다. 강한 셋
+# (Bidding_Ratio · Winning_Ratio · Bidder_Tendency)은 구간별 사기율이 한 번도
+# 꺾이지 않았다.
+#
+# `Auction_Duration` 만 0(제약 없음)이다. eBay 는 경매 기간이 1~10 '일' 인데 우리는
+# 라이브(분)와 일반 경매가 섞여 의미가 달라 서빙에서 뺀 피처이고, 상관도 +0.028 로
+# 사실상 0 이다. **방향을 모르는 피처에 방향을 강제하지 않는다.**
+MONOTONE_DIRECTIONS: dict[str, int] = {
+    "Bidder_Tendency": 1,
+    "Bidding_Ratio": 1,
+    "Last_Bidding": 1,
+    "Auction_Bids": 1,
+    "Starting_Price_Average": 1,
+    "Early_Bidding": 1,
+    "Winning_Ratio": 1,
+    "Successive_Outbidding": 1,   # 서빙에서는 안 쓰지만 절제 실험 A 에 들어간다
+    "Auction_Duration": 0,
+}
+
+
+def monotone_constraints(features: Sequence[str]) -> list[int]:
+    """`features` 순서에 맞춘 단조 제약 목록.
+
+    **이름으로 찾아 순서대로 낸다.** LightGBM 은 이 리스트를 컬럼 순서로 읽으므로
+    고정 리스트를 쓰면 피처 순서나 구성이 바뀌었을 때 엉뚱한 피처에 제약이 걸린다.
+    예외도 안 나고 점수만 조용히 틀어지는 종류의 사고다.
+
+    모르는 피처는 0 이다. 절제 실험이 구성마다 다른 피처를 쓰므로 여기서 막지 않는다.
+    """
+    return [MONOTONE_DIRECTIONS.get(f, 0) for f in features]
+
+
+def _make_model(features: Sequence[str]) -> LGBMClassifier:
     """LightGBM 을 쓰는 이유는 성능보다 ``monotone_constraints`` 때문이다.
 
     '입찰 비중이 높을수록 위험도가 낮아질 수는 없다' 같은 도메인 규칙을 모델에
     강제할 수 있어야, 관리자가 판정 근거를 물었을 때 설명이 무너지지 않는다.
     오탐 이의제기가 정책에 있는 이상 설명 가능성은 정확도만큼 중요하다.
+
+    제약을 걸면 보통 성능을 잃는다. 모델이 데이터에서 찾은 비단조 패턴을 못 쓰기
+    때문이다. **재보니 잃지 않았다** — 5시드 평균 PR-AUC 0.7146 → 0.7232 로 오히려
+    미세하게 올랐고(노이즈 범위), 시드 간 표준편차는 0.0230 → 0.0170 으로 줄었다.
+    제약 없는 모델에서 '값이 커졌는데 위험도가 내려가는' 구간이 343칸 중 20칸
+    있었는데, 그것이 6천 행짜리 데이터의 우연이었다는 뜻이다.
     """
     return LGBMClassifier(
         class_weight="balanced",
@@ -195,6 +240,7 @@ def _make_model() -> LGBMClassifier:
         random_state=RANDOM_STATE,
         n_jobs=-1,
         verbose=-1,
+        monotone_constraints=monotone_constraints(features),
         **TUNED_PARAMS,
     )
 
@@ -218,7 +264,7 @@ def train_one(
     fit_idx, calib_idx = _split(trainval, 0.25, seed + 1)
     fit_df, calib_df = trainval.iloc[fit_idx], trainval.iloc[calib_idx]
 
-    base = _make_model().fit(fit_df[feats], fit_df[TARGET])
+    base = _make_model(feats).fit(fit_df[feats], fit_df[TARGET])
 
     # FrozenEstimator 로 감싸면 이미 학습된 모델을 다시 학습하지 않고 보정만 한다.
     # (sklearn 1.6 에서 cv="prefit" 을 대체했다)

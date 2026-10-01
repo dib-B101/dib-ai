@@ -45,10 +45,11 @@ def test_detect_returns_fraud_detection_columns(client):
     for col in ("member_id", "risk_score", "rule_score", "ml_score", "band", "detail"):
         assert col in row, f"{col} 이 응답에 없다"
 
-    # 모델 트랙 가동 전이다. 섀도 모드면 `ml_score` 가 채워지지만 **판정에는 쓰이지
-    # 않는다** — 그 사실은 null 여부가 아니라 risk_score 로 확인해야 한다.
-    assert body["weights"]["w_ml"] == 0.0
-    assert row["risk_score"] == row["rule_score"], "가중치가 0 인데 판정이 움직였다"
+    # 두 트랙의 비율은 운영 중 바뀐다. 특정 숫자를 박으면 값을 조정할 때마다
+    # 관계없는 테스트가 깨지므로, **합이 1 이고 규칙이 더 크다**는 것만 고정한다.
+    w = body["weights"]
+    assert w["w_rule"] + w["w_ml"] == pytest.approx(1.0)
+    assert w["w_rule"] > w["w_ml"], "검증 전 모델이 규칙보다 크게 반영되면 안 된다"
     assert row["band"] in ("low", "medium", "high")
     assert 0.0 <= row["rule_score"] <= 1.0
 

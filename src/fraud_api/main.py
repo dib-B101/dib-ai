@@ -25,6 +25,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
 
+from envfile import load_env
 from fraud import RuleConfig, combine, detect
 from fraud import ml_features
 from fraud_ml.predict import FraudModel, ModelNotAvailable
@@ -37,11 +38,27 @@ log = logging.getLogger("fraud_api")
 
 # 규칙 점수와 모델 점수의 결합 비율.
 #
-# **기본값은 규칙 100% 다.** 모델은 eBay 데이터로 학습해 우리 도메인에서 검증된 적이
-# 없다. 피처 정의를 논문대로 옮겼지만 분포가 같다는 보장은 없으므로, 우리 데이터로
-# 재학습하기 전까지는 낮게 두거나 0 으로 둔다.
-W_RULE = float(os.getenv("FRAUD_W_RULE", "1.0"))
-W_ML = float(os.getenv("FRAUD_W_ML", "0.0"))
+# 모델은 eBay 데이터로 학습해 우리 도메인에서 검증된 적이 없다. 피처 정의를 논문대로
+# 옮겼지만 분포가 같다는 보장은 없으므로 **낮게 시작한다.** 관리자 판정이 쌓여
+# 모델이 규칙보다 나쁘지 않음을 확인하면 올린다.
+#
+# **`.env` 를 읽은 뒤에 정해야 한다.** 예전에는 모듈을 임포트하는 순간 `os.getenv` 가
+# 실행됐는데, `load_env()` 는 그보다 나중인 lifespan 에서 불린다. 그래서 `.env` 에
+# 무엇을 적든 항상 기본값이 박혔고, 프로세스 환경변수로 직접 줄 때만 동작했다.
+# 예외도 로그도 없이 설정이 무시되는 종류의 사고다.
+W_RULE = 0.9
+W_ML = 0.1
+
+
+def _load_settings() -> None:
+    """`.env` 가 로드된 뒤 설정을 다시 읽는다. lifespan 에서 부른다.
+
+    모듈 임포트 시점의 값은 `.env` 를 못 본 상태라 기본값일 뿐이다.
+    """
+    global W_RULE, W_ML, ML_SHADOW
+    W_RULE = float(os.getenv("FRAUD_W_RULE", "0.9"))
+    W_ML = float(os.getenv("FRAUD_W_ML", "0.1"))
+    ML_SHADOW = _flag("FRAUD_ML_SHADOW", True)
 
 
 def _flag(name: str, default: bool) -> bool:
@@ -78,6 +95,10 @@ _state: dict[str, object] = {}
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 이 앱을 단독으로 띄울 수도 있으므로 여기서도 읽는다. serve.py 가 이미 읽었으면
+    # 같은 값을 다시 넣을 뿐이라 해가 없다.
+    load_env()
+    _load_settings()
     _state["config"] = RuleConfig.load()
     _state["provider"] = _make_provider()
     cfg: RuleConfig = _state["config"]  # type: ignore[assignment]

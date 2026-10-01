@@ -81,11 +81,21 @@ def test_feature_mismatch_is_rejected(tmp_path):
 
 # ---------------------------------------------------------------- API 연결
 
+# 모듈 속성이 아니라 **환경변수**를 바꾼다.
+#
+# 서버는 뜰 때 `.env` 와 환경변수를 읽어 가중치를 정한다. 모듈 속성을 직접 바꾸면
+# 그 과정을 건너뛰어, 설정이 실제로 반영되는지는 확인하지 못한 채 통과한다.
+# 실제로 예전에는 `.env` 의 가중치가 임포트 시점 이후에 로드돼 **영영 무시되고
+# 있었는데**, 속성을 직접 바꾸는 테스트라 아무도 못 잡았다.
+ENV_NAMES = {"W_RULE": "FRAUD_W_RULE", "W_ML": "FRAUD_W_ML", "ML_SHADOW": "FRAUD_ML_SHADOW"}
+
+
 def detect(monkeypatch=None, **overrides) -> dict:
     import fraud_api.main as api
 
     for name, value in overrides.items():
-        monkeypatch.setattr(api, name, value)
+        raw = str(value).lower() if isinstance(value, bool) else str(value)
+        monkeypatch.setenv(ENV_NAMES[name], raw)
     with TestClient(api.app) as c:
         return c.post("/internal/fraud/detect", json={"auction_id": 10002}).json()
 
